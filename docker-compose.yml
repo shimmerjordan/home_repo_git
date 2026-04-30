@@ -1,0 +1,39 @@
+services:
+  backend:
+    build: ./backend
+    container_name: storage-backend
+    restart: unless-stopped
+    volumes:
+      - ./data:/app/data
+    environment:
+      - DATABASE_URL=sqlite:////app/data/storage.db
+      - CONFIG_PATH=/app/data/config.json
+      - LOG_DIR=/app/data/logs
+      - CORS_ORIGINS=*
+      - TZ=${TZ:-Asia/Shanghai}
+    expose:
+      - "8000"
+
+  frontend:
+    build: ./frontend
+    container_name: storage-frontend
+    restart: unless-stopped
+    depends_on:
+      - backend
+    environment:
+      - TZ=${TZ:-Asia/Shanghai}
+    ports:
+      - "${APP_PORT:-8443}:443"
+    volumes:
+      - ./data/certs:/etc/nginx/certs
+
+  whisper:
+    image: onerahmet/openai-whisper-asr-webservice:latest
+    container_name: storage-whisper
+    restart: unless-stopped
+    environment:
+      - ASR_MODEL=small
+      - ASR_ENGINE=openai_whisper
+    expose:
+      - "9000"
+    profiles: ["whisper"]

@@ -1,0 +1,311 @@
+"""Voice-text → structured intent → DB action.
+
+Pipeline:
+  1. Build a compact inventory summary scoped to the query.
+  2. Ask the LLM (via OpenAI-compatible chat) to choose an intent + parameters.
+     Prefer tool-calling; fall back to JSON mode for providers that don't support tools.
+  3. Validate the response, compute confidence, optionally execute.
+"""
+from __future__ import annotations
+
+from datetime import datetime
+from typing import Any
+
+from sqlalchemy.orm import Session
+
+from .. import models
+from ..config import AppConfig
+from ..services.inventory import location_path, search_items, serialize_transaction
+from ..services.summary import build_summary
+from .client import LLMClient, LLMError
+
+
+SYSTEM_PROMPT = """你是家庭仓储管家的语义解析器, 同时要给出温暖、口语化的中文回答。
+你的工作:
+1. 阅读用户语句和当前的库存摘要
+2. 选择一个意图: find / take_out / put_in / list / create_item / unknown
+3. 在候选物品中匹配用户最可能指的物品(基于名称/别名/分类/上下文做语义匹配)
+4. 给出 0~1 之间的 confidence:
+   - 物品名/位置和用户说法明确一致 -> 0.9+
+   - 通过别名/语义推断 -> 0.6~0.85
+   - 多个候选难以区分或缺关键信息 -> <0.5
+   - 库存里没找到匹配 -> <0.3
+5. speech 字段: 用一句温暖的中文话术回答用户(不超过60字), 风格参考下面的例子, 适当口语化:
+   - 找到: "找到啦, 充电宝在卧室床头柜, 库存 1 个"
+   - 模糊找到: "你可能想找的是充电宝, 放在卧室床头柜哦"
+   - 没找到: "暂未找到这种东西, 可能还没登记进来"
+   - 取出成功: "已记录取出充电宝 1 个, 用完记得归位哦"
+   - 存入成功: "好的, 已存入螺丝刀到工具箱, 现在共 3 件"
+   - 新增成功: "记下啦, 充电宝放在卧室床头柜了"
+   - 不确定: "我不太确定, 是想找充电宝吗"
+
+注意:
+- "我刚拿了X"对应 take_out, "我把X放在Y了"对应 put_in
+- 找不到精确匹配, 请在 candidates 列出最接近的几个 id, 并把 confidence 调低
+- 涉及创建新物品时使用 create_item, 必须包含 name 和(可选) location_id
+- 如果完全无法理解, intent=unknown, confidence=0
+"""
+
+
+INTENT_SCHEMA_HINT = """{
+  "intent": "find|take_out|put_in|list|create_item|unknown",
+  "confidence": 0.0,
+  "speech": "string (中文, 给用户的简短回答)",
+  "item_id": null,                // 已存在物品 id (find/take_out/put_in)
+  "item_name": null,              // create_item 用
+  "location_id": null,            // put_in / create_item 可用
+  "quantity": 1,
+  "candidates": [123, 456],       // 备选 item_id, 当不确定时给出
+  "reasoning": "string (一句解释)"
+}"""
+
+
+TOOLS = [
+    {
+        "type": "function",
+        "function": {
+            "name": "submit_intent",
+            "description": "Submit the parsed intent for the user's voice query.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "intent": {
+                        "type": "string",
+                        "enum": ["find", "take_out", "put_in", "list", "create_item", "unknown"],
+                    },
+                    "confidence": {"type": "number", "minimum": 0, "maximum": 1},
+                    "speech": {"type": "string"},
+                    "item_id": {"type": ["integer", "null"]},
+                    "item_name": {"type": ["string", "null"]},
+                    "location_id": {"type": ["integer", "null"]},
+                    "quantity": {"type": "integer", "default": 1},
+                    "candidates": {
+                        "type": "array",
+                        "items": {"type": "integer"},
+                        "default": [],
+                    },
+                    "reasoning": {"type": "string"},
+                },
+                "required": ["intent", "confidence", "speech"],
+            },
+        },
+    }
+]
+
+
+async def parse_intent(text: str, db: Session, cfg: AppConfig) -> dict[str, Any]:
+    summary = build_summary(db, text)
+
+    user_msg = (
+        f"用户语句: {text}\n\n"
+        f"当前库存摘要:\n{summary['text']}\n\n"
+        f"请基于以上摘要和用户语句解析意图。"
+    )
+    if cfg.llm.supports_tools:
+        user_msg += "\n请调用 submit_intent 工具返回结果。"
+    else:
+        user_msg += f"\n请按以下 JSON schema 返回:\n{INTENT_SCHEMA_HINT}"
+
+    messages = [
+        {"role": "system", "content": SYSTEM_PROMPT},
+        {"role": "user", "content": user_msg},
+    ]
+
+    client = LLMClient(cfg.llm)
+    parsed: dict[str, Any]
+    if cfg.llm.supports_tools:
+        result = await client.chat(messages, tools=TOOLS)
+        if result["tool_calls"]:
+            parsed = result["tool_calls"][0]["arguments"]
+        elif result["content"]:
+            # Fallback if model ignored the tool.
+            parsed = await client.chat_json(messages, schema_hint=INTENT_SCHEMA_HINT)
+        else:
+            raise LLMError("Model returned neither tool call nor content")
+    else:
+        parsed = await client.chat_json(messages, schema_hint=INTENT_SCHEMA_HINT)
+
+    # Validate & coerce.
+    parsed.setdefault("intent", "unknown")
+    parsed["confidence"] = max(0.0, min(1.0, float(parsed.get("confidence", 0.0))))
+    parsed.setdefault("speech", "")
+    parsed.setdefault("quantity", 1)
+    parsed.setdefault("candidates", [])
+    return {"parsed": parsed, "summary": summary}
+
+
+def _candidate_objects(db: Session, ids: list[int], fallback_query: str) -> list[models.Item]:
+    if ids:
+        items = db.query(models.Item).filter(models.Item.id.in_(ids)).all()
+        order = {i: idx for idx, i in enumerate(ids)}
+        items.sort(key=lambda x: order.get(x.id, 999))
+        return items
+    return search_items(db, fallback_query, limit=5)
+
+
+def execute_intent(
+    db: Session, text: str, parsed: dict[str, Any], cfg: AppConfig
+) -> dict[str, Any]:
+    """Materialize the parsed intent. Returns the IntentResult-shaped dict."""
+    intent = parsed.get("intent", "unknown")
+    confidence = float(parsed.get("confidence", 0.0))
+    speech = parsed.get("speech", "")
+    threshold = cfg.voice.confidence_threshold
+
+    base = {
+        "intent": intent,
+        "confidence": confidence,
+        "speech": speech,
+        "needs_confirmation": False,
+        "pending_action": None,
+        "candidates": [],
+        "executed": False,
+        "transaction_id": None,
+        "raw": parsed,
+    }
+
+    # Build candidate display.
+    cand_ids = parsed.get("candidates") or []
+    if parsed.get("item_id") and parsed["item_id"] not in cand_ids:
+        cand_ids = [parsed["item_id"], *cand_ids]
+    candidates_objs = _candidate_objects(db, cand_ids, text)
+    base["candidates"] = [
+        {
+            "item_id": it.id,
+            "item_name": it.name,
+            "location_path": location_path(it.location) if it.location else None,
+            "score": 1.0 - (idx * 0.1),
+        }
+        for idx, it in enumerate(candidates_objs)
+    ]
+
+    # Low confidence -> ask the user to confirm rather than mutating data.
+    if intent in {"take_out", "put_in"} and confidence < threshold:
+        base["needs_confirmation"] = True
+        base["pending_action"] = {
+            "intent": intent,
+            "item_id": parsed.get("item_id"),
+            "location_id": parsed.get("location_id"),
+            "quantity": int(parsed.get("quantity") or 1),
+        }
+        if not speech:
+            top = candidates_objs[0].name if candidates_objs else "这个物品"
+            base["speech"] = f"我不太确定,你是想{('取出' if intent == 'take_out' else '存放')}{top}吗"
+        return base
+
+    # Execute.
+    if intent == "find":
+        if candidates_objs:
+            top = candidates_objs[0]
+            # Group items that share the same display name with the top match — the user
+            # likely wants to know all of them ("X 在 N 个地方").
+            same_name = [c for c in candidates_objs if c.name == top.name]
+            if len(same_name) >= 2:
+                place_list = []
+                for c in same_name:
+                    p = location_path(c.location) or "未登记位置"
+                    place_list.append(f"{p} (×{c.quantity})")
+                base["speech"] = (
+                    f"{top.name}在 {len(same_name)} 个地方都有: " + " ; ".join(place_list)
+                )
+                # Make sure the result's `candidates` includes ALL these same-name matches
+                # so the frontend can highlight every one in 3D.
+                base["candidates"] = [
+                    {
+                        "item_id": c.id,
+                        "item_name": c.name,
+                        "location_path": location_path(c.location) if c.location else None,
+                        "score": 1.0 - (i * 0.05),
+                    }
+                    for i, c in enumerate(same_name)
+                ]
+            else:
+                loc = location_path(top.location) or "未登记位置"
+                if not speech:
+                    if confidence >= 0.85:
+                        base["speech"] = f"找到啦,{top.name}在{loc},库存{top.quantity}个"
+                    else:
+                        base["speech"] = f"你可能想找的是{top.name},放在{loc},库存{top.quantity}个"
+        else:
+            base["speech"] = speech or "暂未找到这种东西,可能还没登记进来"
+        return base
+
+    if intent == "list":
+        return base
+
+    if intent == "create_item":
+        name = (parsed.get("item_name") or "").strip()
+        if not name:
+            base["speech"] = speech or "请告诉我物品名称"
+            base["intent"] = "unknown"
+            return base
+        item = models.Item(
+            name=name,
+            location_id=parsed.get("location_id"),
+            quantity=int(parsed.get("quantity") or 1),
+        )
+        db.add(item)
+        db.flush()
+        tx = models.Transaction(
+            item_id=item.id,
+            action="put_in",
+            quantity=item.quantity,
+            location_id=item.location_id,
+            note="语音创建",
+        )
+        db.add(tx)
+        db.commit()
+        db.refresh(tx)
+        base["executed"] = True
+        base["transaction_id"] = tx.id
+        loc = item.location
+        loc_text = location_path(loc) if loc else "未指定位置"
+        base["speech"] = speech or f"记下啦,{name}放在{loc_text}了"
+        return base
+
+    if intent in {"take_out", "put_in"}:
+        item_id = parsed.get("item_id")
+        if not item_id and candidates_objs:
+            item_id = candidates_objs[0].id
+        if not item_id:
+            base["intent"] = "unknown"
+            base["speech"] = speech or "没找到这个物品,要不要先创建一个"
+            return base
+        item: models.Item | None = db.query(models.Item).get(item_id)
+        if not item:
+            base["intent"] = "unknown"
+            base["speech"] = "物品不存在了"
+            return base
+        qty = int(parsed.get("quantity") or 1)
+        loc_id = parsed.get("location_id") or item.location_id
+        if intent == "take_out":
+            item.quantity = max(0, (item.quantity or 0) - qty)
+        else:
+            item.quantity = (item.quantity or 0) + qty
+            if parsed.get("location_id"):
+                item.location_id = parsed["location_id"]
+        item.updated_at = datetime.now()
+        tx = models.Transaction(
+            item_id=item.id,
+            action=intent,
+            quantity=qty,
+            location_id=loc_id,
+            note="语音操作",
+        )
+        db.add(tx)
+        db.commit()
+        db.refresh(tx)
+        base["executed"] = True
+        base["transaction_id"] = tx.id
+        if not base["speech"]:
+            if intent == "take_out":
+                base["speech"] = f"已取出{item.name} {qty}个,用完记得归位哦,当前余量{item.quantity}"
+            else:
+                loc_text = location_path(item.location) if item.location else "原位置"
+                base["speech"] = f"好的,已存入{item.name} {qty}个到{loc_text},现在共{item.quantity}件"
+        return base
+
+    # unknown
+    if not base["speech"]:
+        base["speech"] = "没听懂呢,能换个说法吗"
+    return base
