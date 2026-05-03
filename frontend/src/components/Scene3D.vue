@@ -151,8 +151,22 @@ function rebuild() {
     const { geo } = info
     const isRoom = info.loc.kind === 'room'
     const cy = info.y + geo.h / 2
-    const boxGeo = new THREE.BoxGeometry(geo.w, geo.h, geo.d)
-    // Very transparent shell so internal structure (shelves, contents) is visible.
+    // Polygon rooms use an extruded shape; everything else uses a centred BoxGeometry.
+    const isPoly = isRoom && Array.isArray(geo.polygon) && geo.polygon.length >= 3
+    let bodyGeo
+    let meshY = cy
+    if (isPoly) {
+      // Three.js Shape lives on XY. We build it in world XZ coords and rotate so
+      // depth becomes height. Negate Z to keep CCW winding and avoid mirroring.
+      const pts = geo.polygon.map(([x, z]) => new THREE.Vector2(x, -z))
+      const shape = new THREE.Shape(pts)
+      bodyGeo = new THREE.ExtrudeGeometry(shape, { depth: geo.h, bevelEnabled: false })
+      bodyGeo.rotateX(-Math.PI / 2)
+      // ExtrudeGeometry now spans Y from 0 (floor) to geo.h (ceiling), so place at info.y.
+      meshY = info.y
+    } else {
+      bodyGeo = new THREE.BoxGeometry(geo.w, geo.h, geo.d)
+    }
     const mat = new THREE.MeshStandardMaterial({
       color: new THREE.Color(geo.color),
       transparent: true,
@@ -162,14 +176,14 @@ function rebuild() {
       metalness: 0.05,
       side: THREE.DoubleSide,
     })
-    const mesh = new THREE.Mesh(boxGeo, mat)
-    mesh.position.set(info.x, cy, info.z)
+    const mesh = new THREE.Mesh(bodyGeo, mat)
+    mesh.position.set(info.x, meshY, info.z)
     mesh.rotation.y = (geo.rot || 0) * Math.PI / 180
     mesh.userData = { type: 'location', id }
-    mesh.renderOrder = 1  // shell renders after opaque interior bits
+    mesh.renderOrder = 1
 
     const edges = new THREE.LineSegments(
-      new THREE.EdgesGeometry(boxGeo),
+      new THREE.EdgesGeometry(bodyGeo),
       new THREE.LineBasicMaterial({ color: new THREE.Color(geo.color) }),
     )
     mesh.add(edges)
@@ -639,6 +653,18 @@ function commitTransform() {
     color: info.geo.color,
     levels: info.geo.levels,
     level: newLevel,
+  }
+  // Polygon rooms: scale the polygon points proportionally so the actual shape
+  // resizes (otherwise the bbox-derived w/d would disagree with the underlying poly).
+  const oldPoly = loc.geometry?.polygon
+  if (Array.isArray(oldPoly) && oldPoly.length >= 3) {
+    const sx = mesh.scale.x, sz = mesh.scale.z
+    if (Math.abs(sx - 1) > 1e-3 || Math.abs(sz - 1) > 1e-3) {
+      newGeo.polygon = oldPoly.map(([x, z]) => [
+        Math.round(x * sx * 1000) / 1000,
+        Math.round(z * sz * 1000) / 1000,
+      ])
+    }
   }
 
   emit('transform-end', {

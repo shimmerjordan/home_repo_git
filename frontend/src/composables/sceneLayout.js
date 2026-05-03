@@ -37,21 +37,176 @@ export function defaultsFor(kind) {
   return KIND_DEFAULTS[kind] || KIND_DEFAULTS.other
 }
 
+// Polygon helpers — used for non-rectangular rooms. Polygon points are [x, z]
+// in metres, RELATIVE to the room's geometry.x / geometry.z anchor.
+export function polygonBBox(poly) {
+  if (!poly || poly.length === 0) return null
+  let minX = Infinity, maxX = -Infinity, minZ = Infinity, maxZ = -Infinity
+  for (const p of poly) {
+    const x = +p[0], z = +p[1]
+    if (x < minX) minX = x
+    if (x > maxX) maxX = x
+    if (z < minZ) minZ = z
+    if (z > maxZ) maxZ = z
+  }
+  return { minX, maxX, minZ, maxZ, w: maxX - minX, d: maxZ - minZ,
+           cx: (minX + maxX) / 2, cz: (minZ + maxZ) / 2 }
+}
+
+// Snap a 2D direction to the nearest reference angle (in degrees) within tolerance.
+// `refs` defaults to horizontal/vertical (axis-aligned). Returns the snapped angle in
+// degrees, or null if none of the references is within tolerance.
+export function snapAngleDeg(angleDeg, refs = [0, 90, 180, -90], tolDeg = 7) {
+  let best = null, bestDiff = tolDeg + 1
+  for (const r of refs) {
+    const diff = Math.abs(((angleDeg - r + 540) % 360) - 180)
+    if (diff < bestDiff) { bestDiff = diff; best = r }
+  }
+  return bestDiff <= tolDeg ? best : null
+}
+
+// Given a starting point and a raw cursor, snap the direction of the segment
+// to horizontal/vertical or to angles parallel/perpendicular to any reference
+// edge. Length is rounded to the grid. Returns `{ p, snappedAngle, refUsed }`
+// where `p` is the snapped end point and `snappedAngle` is null when no rule fired.
+export function snapPolygonStep(prevPt, cursor, refEdges = [], tolDeg = 7, gridStep = 0.05) {
+  if (!prevPt) return { p: cursor, snappedAngle: null, refUsed: null }
+  const dx = cursor[0] - prevPt[0]
+  const dz = cursor[1] - prevPt[1]
+  const len = Math.hypot(dx, dz)
+  if (len < 0.04) return { p: cursor, snappedAngle: null, refUsed: null }
+  const ang = Math.atan2(dz, dx) * 180 / Math.PI
+
+  // Build the candidate angle set: axis-aligned + parallel/perpendicular to refs.
+  const refs = [0, 90, 180, -90]
+  for (const e of refEdges) {
+    const a = Math.atan2(e[1], e[0]) * 180 / Math.PI
+    refs.push(a, a + 90, a - 90, a + 180)
+  }
+  const snapped = snapAngleDeg(ang, refs, tolDeg)
+
+  const finalAng = snapped == null ? ang : snapped
+  // Round length to grid for clean numbers (e.g. 3.05 m).
+  const snapLen = Math.max(gridStep, Math.round(len / gridStep) * gridStep)
+  const r = finalAng * Math.PI / 180
+  return {
+    p: [prevPt[0] + Math.cos(r) * snapLen, prevPt[1] + Math.sin(r) * snapLen],
+    snappedAngle: snapped,
+    refUsed: snapped == null ? null : (Math.abs(snapped) === 90 || snapped === 0 || Math.abs(snapped) === 180 ? 'axis' : 'parallel'),
+  }
+}
+
+// Drop vertices that are within `minDistM` of the previous one (typo / double-tap)
+// and vertices that are collinear with their neighbours (within `collinearTolM`).
+export function cleanPolygon(pts, minDistM = 0.05, collinearTolM = 0.01) {
+  if (!pts || pts.length < 3) return pts || []
+  // Pass 1: drop near-duplicate consecutive points.
+  const passOne = []
+  for (const p of pts) {
+    const prev = passOne[passOne.length - 1]
+    if (!prev || Math.hypot(p[0] - prev[0], p[1] - prev[1]) >= minDistM) {
+      passOne.push([p[0], p[1]])
+    }
+  }
+  // Wrap-around dedupe between last and first.
+  while (passOne.length >= 2) {
+    const a = passOne[0], b = passOne[passOne.length - 1]
+    if (Math.hypot(a[0] - b[0], a[1] - b[1]) < minDistM) passOne.pop()
+    else break
+  }
+  if (passOne.length < 3) return passOne
+  // Pass 2: drop vertices that lie on the line between their neighbours.
+  const passTwo = []
+  const n = passOne.length
+  for (let i = 0; i < n; i++) {
+    const prev = passOne[(i - 1 + n) % n]
+    const cur = passOne[i]
+    const next = passOne[(i + 1) % n]
+    const dx = next[0] - prev[0], dz = next[1] - prev[1]
+    const len = Math.hypot(dx, dz)
+    let perp = 0
+    if (len > 1e-9) {
+      perp = Math.abs(dx * (prev[1] - cur[1]) - (prev[0] - cur[0]) * dz) / len
+    }
+    if (perp >= collinearTolM) passTwo.push(cur)
+  }
+  return passTwo.length >= 3 ? passTwo : passOne
+}
+
+// Signed area; positive = CCW (in screen-y-down space, which is our (x, z) plane).
+export function polygonSignedArea(poly) {
+  if (!poly || poly.length < 3) return 0
+  let s = 0
+  for (let i = 0, n = poly.length; i < n; i++) {
+    const [ax, az] = poly[i]
+    const [bx, bz] = poly[(i + 1) % n]
+    s += ax * bz - bx * az
+  }
+  return s / 2
+}
+
+// Returns true if any non-adjacent edges of `poly` cross. Used as a sanity check
+// after the user finishes drawing — if the polygon is self-intersecting, we warn.
+export function polygonIsSelfIntersecting(poly) {
+  if (!poly || poly.length < 4) return false
+  const n = poly.length
+  function segsCross(a1, a2, b1, b2) {
+    const d = (a2[0] - a1[0]) * (b2[1] - b1[1]) - (a2[1] - a1[1]) * (b2[0] - b1[0])
+    if (Math.abs(d) < 1e-9) return false
+    const t = ((b1[0] - a1[0]) * (b2[1] - b1[1]) - (b1[1] - a1[1]) * (b2[0] - b1[0])) / d
+    const u = ((b1[0] - a1[0]) * (a2[1] - a1[1]) - (b1[1] - a1[1]) * (a2[0] - a1[0])) / d
+    return t > 1e-6 && t < 1 - 1e-6 && u > 1e-6 && u < 1 - 1e-6
+  }
+  for (let i = 0; i < n; i++) {
+    const a1 = poly[i], a2 = poly[(i + 1) % n]
+    for (let j = i + 2; j < n; j++) {
+      // Skip the pair that share a vertex (i's last edge wraps to first).
+      if (i === 0 && j === n - 1) continue
+      const b1 = poly[j], b2 = poly[(j + 1) % n]
+      if (segsCross(a1, a2, b1, b2)) return true
+    }
+  }
+  return false
+}
+
+// Standard ray-casting point-in-polygon test. (px, pz) and poly are in the
+// SAME coordinate frame (caller is responsible for un-rotating if needed).
+export function pointInPolygon(px, pz, poly) {
+  if (!poly || poly.length < 3) return false
+  let inside = false
+  for (let i = 0, j = poly.length - 1; i < poly.length; j = i++) {
+    const xi = +poly[i][0], zi = +poly[i][1]
+    const xj = +poly[j][0], zj = +poly[j][1]
+    const intersect = ((zi > pz) !== (zj > pz))
+      && (px < (xj - xi) * (pz - zi) / ((zj - zi) || 1e-9) + xi)
+    if (intersect) inside = !inside
+  }
+  return inside
+}
+
 export function effectiveGeometry(loc) {
-  const d = defaultsFor(loc.kind)
+  const def = defaultsFor(loc.kind)
   const g = loc.geometry || {}
+  const poly = Array.isArray(g.polygon) && g.polygon.length >= 3 ? g.polygon : null
+  let w = +g.w || def.w
+  let d = +g.d || def.d
+  if (poly) {
+    const bb = polygonBBox(poly)
+    if (bb) { w = bb.w || w; d = bb.d || d }
+  }
   return {
     x: +g.x || 0,
     y: +g.y || 0,
     z: +g.z || 0,
-    w: +g.w || d.w,
-    h: +g.h || d.h,
-    d: +g.d || d.d,
+    w,
+    h: +g.h || def.h,
+    d,
     rot: +g.rot || 0,
-    color: g.color || d.color,
-    levels: Number.isFinite(+g.levels) ? +g.levels : (d.levels || 0),
+    color: g.color || def.color,
+    levels: Number.isFinite(+g.levels) ? +g.levels : (def.levels || 0),
     level: +g.level || 0,
-    slot: +g.slot || 0,        // 1-based ordering within (parent, level); 0 = free placement
+    slot: +g.slot || 0,
+    polygon: poly,
     _set: !!loc.geometry,
   }
 }

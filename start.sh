@@ -9,7 +9,7 @@
 set -euo pipefail
 cd "$(dirname "$0")"
 
-CMD="up -d --build"
+CMD=(up -d --build)
 PROFILES=()
 FOLLOW=false
 
@@ -29,7 +29,11 @@ done
 
 mkdir -p data data/certs
 
-docker compose "${PROFILES[@]}" $CMD
+if [ ${#PROFILES[@]} -gt 0 ]; then
+  docker compose "${PROFILES[@]}" "${CMD[@]}"
+else
+  docker compose "${CMD[@]}"
+fi
 
 PORT="${APP_PORT:-8443}"
 IP=$(hostname -I 2>/dev/null | awk '{print $1}')
