@@ -15,3 +15,8 @@ body { font-family: -apple-system, BlinkMacSystemFont, "PingFang SC", "Microsoft
 .card { @apply bg-white rounded-xl shadow-sm border border-slate-200; }
 .label { @apply text-xs font-medium text-slate-500 uppercase tracking-wide; }
 .tag { @apply inline-block text-xs px-2 py-0.5 rounded-full bg-slate-100 text-slate-700; }
+
+/* Hide scrollbar on horizontal-scroll bars (toolbar, tab strip on iPad) — keeps the
+   touch-scroll affordance without the visible scrollbar bar/thumb stealing space. */
+.no-scrollbar::-webkit-scrollbar { display: none; }
+.no-scrollbar { -ms-overflow-style: none; scrollbar-width: none; }

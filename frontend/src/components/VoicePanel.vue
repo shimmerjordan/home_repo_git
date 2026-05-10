@@ -5,6 +5,21 @@ import { useVoice } from '../composables/useVoice'
 import { useAudioMeter } from '../composables/useAudioMeter'
 import Waveform from './Waveform.vue'
 import Scene3D from './Scene3D.vue'
+import { isLowEndDevice } from '../composables/sceneLayout'
+
+// Persisted 3D quality preference shared with BuildingPanel via localStorage.
+const LQ_KEY = 'storage.scene3d.lowQuality'
+function loadLQ() {
+  try {
+    const raw = localStorage.getItem(LQ_KEY)
+    if (raw === '0' || raw === '1') return raw === '1'
+  } catch {}
+  return isLowEndDevice()
+}
+const lowQuality = ref(loadLQ())
+watch(() => lowQuality.value, (v) => {
+  try { localStorage.setItem(LQ_KEY, v ? '1' : '0') } catch {}
+})
 
 const props = defineProps({ settings: Object, refreshKey: Number })
 const emit = defineEmits(['changed'])
@@ -477,7 +492,9 @@ const inConfirm = computed(() => phase.value === 'confirm-text' || phase.value =
                  :highlight-item-id="sceneHighlightItem"
                  :highlight-item-ids="sceneHighlightIds"
                  :highlight-location-id="sceneHighlightLoc"
-                 :height="500" />
+                 :low-quality="lowQuality"
+                 :height="'clamp(280px, 42vh, 520px)'"
+                 @update:low-quality="lowQuality = $event" />
         <div class="text-xs text-slate-400">语音找到物品时这里会自动推进镜头并高亮目标(其余区域半透淡出)。</div>
       </div>
 

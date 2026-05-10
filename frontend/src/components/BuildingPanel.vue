@@ -5,7 +5,7 @@ import PlanEditor from './PlanEditor.vue'
 import Scene3D from './Scene3D.vue'
 import LocationTreeNode from './LocationTreeNode.vue'
 import LevelSlotFields from './LevelSlotFields.vue'
-import { catalogFor, autoArrange, effectiveGeometry } from '../composables/sceneLayout'
+import { catalogFor, autoArrange, effectiveGeometry, isLowEndDevice } from '../composables/sceneLayout'
 import { useEditHistory } from '../composables/useEditHistory'
 
 const props = defineProps({ refreshKey: Number })
@@ -20,15 +20,32 @@ const highlightItemId = ref(null)
 const highlightLocationId = ref(null)
 
 // View state. iPad-friendly: tree is a slide-out drawer, view-mode toggles between
-// 2D / 3D / Split. Default: split on lg+, 3D on smaller.
-const isWide = ref(typeof window !== 'undefined' && window.innerWidth >= 1024)
+// 2D / 3D / Split. Default: split only on really wide screens (≥1280px) so iPad
+// landscape (~1180px) starts in single-pane 3D mode and isn't crammed.
+const isWide = ref(typeof window !== 'undefined' && window.innerWidth >= 1280)
 const viewMode = ref(isWide.value ? 'split' : '3d')   // '2d' | '3d' | 'split'
 const treeOpen = ref(false)
 const propsOpen = ref(true)
 
+// 3D quality: persisted per device. Auto-default to "off" on iPad / touch devices
+// so the page opens smoothly; user can switch it on via the ☀/🌙 button in the
+// 3D viewer.
+const LQ_KEY = 'storage.scene3d.lowQuality'
+function loadLowQuality() {
+  try {
+    const raw = localStorage.getItem(LQ_KEY)
+    if (raw === '0' || raw === '1') return raw === '1'
+  } catch {}
+  return isLowEndDevice()
+}
+const lowQuality = ref(loadLowQuality())
+watch(lowQuality, (v) => {
+  try { localStorage.setItem(LQ_KEY, v ? '1' : '0') } catch {}
+})
+
 if (typeof window !== 'undefined') {
   window.addEventListener('resize', () => {
-    isWide.value = window.innerWidth >= 1024
+    isWide.value = window.innerWidth >= 1280
   })
 }
 
@@ -280,9 +297,11 @@ function selectFromTree(id) {
                  :highlight-location-id="highlightLocationId"
                  :selected-location-id="selectedId"
                  :selectable="true" :editable="true"
-                 :height="viewMode === '3d' ? 600 : 540"
+                 :low-quality="lowQuality"
+                 :height="viewMode === '3d' ? 'clamp(360px, 62vh, 720px)' : 'clamp(320px, 56vh, 640px)'"
                  @select-location="selectedId = $event"
                  @select-item="(id) => { highlightItemId = null; setTimeout(() => highlightItemId = id, 30) }"
+                 @update:low-quality="lowQuality = $event"
                  @transform-end="on3DTransformEnd" />
       </div>
     </div>

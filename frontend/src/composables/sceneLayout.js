@@ -22,6 +22,17 @@ export const FURNITURE_CATALOG = [
   { kind: 'sofa',     label: '沙发',   icon: '🛋', w: 2.0,  h: 0.85, d: 0.9,  color: '#ef4444', container: false, levels: 0, placement: 'top' },
   { kind: 'chair',    label: '椅子',   icon: '🪑', w: 0.5,  h: 0.9,  d: 0.5,  color: '#dc2626', container: false, levels: 0, placement: 'top' },
   { kind: 'plant',    label: '盆栽',   icon: '🪴', w: 0.4,  h: 0.8,  d: 0.4,  color: '#16a34a', container: false, levels: 0, placement: 'top' },
+  // ---- Appliances / fixtures ----
+  { kind: 'fridge',   label: '冰箱',   icon: '🧊', w: 0.7,  h: 1.85, d: 0.7,  color: '#e2e8f0', container: true,  levels: 4, placement: 'inside' },
+  { kind: 'washer',   label: '洗衣机', icon: '🧺', w: 0.6,  h: 0.85, d: 0.6,  color: '#cbd5e1', container: true,  levels: 0, placement: 'inside' },
+  { kind: 'stove',    label: '燃气灶', icon: '🔥', w: 0.7,  h: 0.10, d: 0.55, color: '#1e293b', container: false, levels: 0, placement: 'top' },
+  { kind: 'sink',     label: '洗手台', icon: '🚰', w: 0.6,  h: 0.85, d: 0.5,  color: '#dbeafe', container: false, levels: 0, placement: 'inside' },
+  { kind: 'toilet',   label: '坐便器', icon: '🚽', w: 0.4,  h: 0.75, d: 0.7,  color: '#f8fafc', container: false, levels: 0, placement: 'inside' },
+  { kind: 'bathtub',  label: '浴缸',   icon: '🛁', w: 1.7,  h: 0.55, d: 0.75, color: '#e0f2fe', container: false, levels: 0, placement: 'inside' },
+  { kind: 'shower',   label: '淋浴',   icon: '🚿', w: 0.9,  h: 2.0,  d: 0.9,  color: '#bae6fd', container: false, levels: 0, placement: 'inside' },
+  { kind: 'tv',       label: '电视',   icon: '📺', w: 1.3,  h: 0.80, d: 0.10, color: '#0f172a', container: false, levels: 0, placement: 'top' },
+  { kind: 'ac',       label: '空调',   icon: '❄️', w: 0.85, h: 0.30, d: 0.20, color: '#f1f5f9', container: false, levels: 0, placement: 'inside' },
+  { kind: 'microwave',label: '微波炉', icon: '🍱', w: 0.5,  h: 0.30, d: 0.40, color: '#475569', container: false, levels: 0, placement: 'top' },
 ]
 
 export const KIND_DEFAULTS = Object.fromEntries(
@@ -35,6 +46,22 @@ export function catalogFor(kind) {
 
 export function defaultsFor(kind) {
   return KIND_DEFAULTS[kind] || KIND_DEFAULTS.other
+}
+
+// Best-effort detection of mobile / touch / low-power devices so we can default
+// to a "low quality" 3D mode (no shadows, no per-room lights). Users can flip the
+// switch in the 3D viewer's toolbar if they want pretty visuals.
+export function isLowEndDevice() {
+  if (typeof window === 'undefined') return false
+  const ua = (navigator.userAgent || '') + ''
+  if (/iPad|iPhone|iPod|Android/i.test(ua)) return true
+  // iPadOS 13+ reports as MacIntel + multi-touch.
+  if (navigator.platform === 'MacIntel' && (navigator.maxTouchPoints || 0) > 1) return true
+  // Generic coarse-pointer touch device.
+  try {
+    if (window.matchMedia && window.matchMedia('(pointer: coarse)').matches) return true
+  } catch {}
+  return false
 }
 
 // Polygon helpers — used for non-rectangular rooms. Polygon points are [x, z]

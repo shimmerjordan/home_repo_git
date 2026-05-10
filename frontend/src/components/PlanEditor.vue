@@ -757,7 +757,7 @@ const ghost = computed(() => {
 <template>
   <div class="flex flex-col gap-2">
     <!-- Toolbar: horizontal scroll, compact icons (labels hidden on narrow screens) -->
-    <div class="card p-1.5 flex items-center gap-1 overflow-x-auto" style="touch-action: pan-x">
+    <div class="card p-1.5 flex items-center gap-1 overflow-x-auto no-scrollbar" style="touch-action: pan-x">
       <button :class="['btn text-xs flex-shrink-0', tool==='select' ? 'btn-primary' : 'btn-secondary']"
               title="选择 / 移动 / 平移画布"
               @click="tool='select'">↖<span class="hidden sm:inline ml-1">选择</span></button>

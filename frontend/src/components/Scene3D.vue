@@ -1,5 +1,5 @@
 <script setup>
-import { ref, watch, onMounted, onBeforeUnmount, shallowRef } from 'vue'
+import { ref, computed, watch, onMounted, onBeforeUnmount, shallowRef } from 'vue'
 import * as THREE from 'three'
 import { OrbitControls } from 'three/examples/jsm/controls/OrbitControls.js'
 import { TransformControls } from 'three/examples/jsm/controls/TransformControls.js'
@@ -11,12 +11,19 @@ const props = defineProps({
   highlightItemId: { type: Number, default: null },
   highlightItemIds: { type: Array, default: () => [] },   // multi-target (overrides single)
   highlightLocationId: { type: Number, default: null },
-  height: { type: Number, default: 480 },
+  // Accept either a number of pixels or any CSS string (e.g. "clamp(360px, 50vh, 700px)").
+  height: { type: [Number, String], default: 480 },
   selectable: { type: Boolean, default: false },
   editable: { type: Boolean, default: false },
   selectedLocationId: { type: Number, default: null },
+  // When true, skip shadows and per-room point lights so iPad / touch devices stay
+  // smooth. Auto-detected upstream; user can flip the switch via the toolbar.
+  lowQuality: { type: Boolean, default: false },
 })
-const emit = defineEmits(['select-location', 'select-item', 'transform-end'])
+const emit = defineEmits(['select-location', 'select-item', 'transform-end', 'update:low-quality'])
+
+// Resolved CSS height for the renderer container.
+const containerHeight = computed(() => typeof props.height === 'number' ? props.height + 'px' : String(props.height))
 
 const container = ref(null)
 const tooltip = ref({ visible: false, x: 0, y: 0, text: '' })
@@ -39,16 +46,16 @@ function init() {
   scene.fog = new THREE.Fog(0x14213d, 30, 80)
 
   const w = container.value.clientWidth || 600
-  const h = props.height
+  const h = container.value.clientHeight || (typeof props.height === 'number' ? props.height : 480)
   camera = new THREE.PerspectiveCamera(45, w / h, 0.05, 500)
   camera.position.set(8, 9, 10)
 
-  renderer = new THREE.WebGLRenderer({ antialias: true })
+  renderer = new THREE.WebGLRenderer({ antialias: !props.lowQuality })
   renderer.setSize(w, h)
-  renderer.setPixelRatio(window.devicePixelRatio)
-  renderer.shadowMap.enabled = true
+  // Cap pixel ratio in low-quality mode to keep iPad Safari smooth.
+  renderer.setPixelRatio(props.lowQuality ? Math.min(1.5, window.devicePixelRatio) : window.devicePixelRatio)
+  renderer.shadowMap.enabled = !props.lowQuality
   renderer.shadowMap.type = THREE.PCFSoftShadowMap
-  // Modern color/tone management for richer materials.
   renderer.outputColorSpace = THREE.SRGBColorSpace
   renderer.toneMapping = THREE.ACESFilmicToneMapping
   renderer.toneMappingExposure = 1.05
@@ -63,18 +70,20 @@ function init() {
   const hemi = new THREE.HemisphereLight(0xbfd4ff, 0x6b5a48, 0.45)
   hemi.position.set(0, 30, 0)
   scene.add(hemi)
-  // Sun: directional light with shadows.
-  const sun = new THREE.DirectionalLight(0xffeed5, 0.9)
+  // Sun: directional light. Shadows only in high-quality mode (very expensive on iPad).
+  const sun = new THREE.DirectionalLight(0xffeed5, props.lowQuality ? 1.0 : 0.9)
   sun.position.set(18, 28, 14)
-  sun.castShadow = true
-  sun.shadow.mapSize.set(1024, 1024)
-  sun.shadow.camera.near = 1
-  sun.shadow.camera.far = 80
-  sun.shadow.camera.left = -25
-  sun.shadow.camera.right = 25
-  sun.shadow.camera.top = 25
-  sun.shadow.camera.bottom = -25
-  sun.shadow.bias = -0.0005
+  if (!props.lowQuality) {
+    sun.castShadow = true
+    sun.shadow.mapSize.set(1024, 1024)
+    sun.shadow.camera.near = 1
+    sun.shadow.camera.far = 80
+    sun.shadow.camera.left = -25
+    sun.shadow.camera.right = 25
+    sun.shadow.camera.top = 25
+    sun.shadow.camera.bottom = -25
+    sun.shadow.bias = -0.0005
+  }
   scene.add(sun)
 
   // Floor plane (catches shadows, gives a "ground" feel).
@@ -84,7 +93,7 @@ function init() {
   const floor = new THREE.Mesh(new THREE.PlaneGeometry(80, 80), floorMat)
   floor.rotation.x = -Math.PI / 2
   floor.position.y = -0.02
-  floor.receiveShadow = true
+  floor.receiveShadow = !props.lowQuality
   scene.add(floor)
 
   const grid = new THREE.GridHelper(40, 40, 0x334155, 0x1e293b)
@@ -110,7 +119,7 @@ function init() {
   resizeObserver = new ResizeObserver(() => {
     if (!container.value) return
     const ww = container.value.clientWidth
-    const hh = props.height
+    const hh = container.value.clientHeight     // pull from actual layout, supports CSS clamp()
     if (ww > 0 && hh > 0) {
       renderer.setSize(ww, hh)
       camera.aspect = ww / hh
@@ -216,20 +225,23 @@ function rebuild() {
       mesh.add(back)
     }
 
-    // Casts/receives shadows for solid-ish furniture (skip rooms — they're translucent shells).
-    if (!isRoom) {
-      mesh.castShadow = true
-      mesh.receiveShadow = true
-    } else {
-      mesh.receiveShadow = true
+    // Shadows only when lighting is on (skip rooms — they're translucent shells).
+    if (!props.lowQuality) {
+      if (!isRoom) {
+        mesh.castShadow = true
+        mesh.receiveShadow = true
+      } else {
+        mesh.receiveShadow = true
+      }
     }
 
     scene.add(mesh)
     const slot = { mesh, world: { x: info.x, y: cy, z: info.z }, geo, locInfo: info,
                    roomLight: null, roomLamp: null }
 
-    // Per-room ceiling light. Default off; auto-on for the active/highlighted room.
-    if (isRoom) {
+    // Per-room ceiling light: only in high-quality mode (point lights + shadow
+    // updates are the single biggest perf hit on iPad Safari).
+    if (isRoom && !props.lowQuality) {
       const lampY = cy + geo.h / 2 - 0.08
       const light = new THREE.PointLight(0xffe8b0, 0.0,
         Math.max(geo.w, geo.d) * 1.6, 1.8)
@@ -727,6 +739,23 @@ onBeforeUnmount(() => {
   if (renderer) { renderer.dispose(); renderer.domElement.remove() }
 })
 
+// Rebuilding the renderer is the cleanest way to honour a runtime lowQuality flip
+// (shadow map state, perRoom lights and pixel ratio are all set up in init()).
+watch(() => props.lowQuality, () => {
+  cancelAnimationFrame(raf)
+  resizeObserver?.disconnect()
+  controls?.dispose()
+  transformControls?.dispose?.()
+  if (renderer) { renderer.dispose(); renderer.domElement.remove() }
+  // Reset module-locals so re-init starts cleanly.
+  scene = camera = renderer = controls = transformControls = null
+  locMeshes.value = new Map()
+  itemMeshes.value = new Map()
+  init()
+  rebuild()
+  loop()
+})
+
 watch(() => [props.locations, props.items], rebuild, { deep: true })
 watch(() => props.highlightItemId, (v) => { if (v) focusItems([v]); updateRoomLights() })
 watch(() => props.highlightItemIds, (v) => {
@@ -741,7 +770,7 @@ defineExpose({ focusItem, focusItems, focusLocation, fitAll, setTransformMode })
 
 <template>
   <div class="relative">
-    <div ref="container" :style="{ height: height + 'px' }"
+    <div ref="container" :style="{ height: containerHeight }"
          class="rounded-lg overflow-hidden border border-slate-200 bg-slate-900"></div>
     <div v-if="tooltip.visible"
          class="pointer-events-none absolute bg-slate-900/95 text-white text-xs rounded px-2 py-1 shadow-lg"
@@ -751,6 +780,11 @@ defineExpose({ focusItem, focusItems, focusLocation, fitAll, setTransformMode })
     <div class="absolute top-2 right-2 flex flex-col gap-1 items-end">
       <button class="px-2 py-1 rounded bg-white/90 hover:bg-white text-xs shadow"
               @click="fitAll(true)" title="重置视角">⤢</button>
+      <button class="px-2 py-1 rounded bg-white/90 hover:bg-white text-xs shadow"
+              :title="lowQuality ? '当前: 省电模式 (无阴影, 无吸顶灯). 点击切换到全光照' : '当前: 全光照 (耗电较高). 点击切换到省电模式'"
+              @click="$emit('update:low-quality', !lowQuality)">
+        {{ lowQuality ? '🌙 省电' : '☀ 光照' }}
+      </button>
       <div v-if="editable" class="bg-white/90 rounded shadow flex text-xs overflow-hidden">
         <button :class="['px-2 py-1', transformMode==='translate' && 'bg-slate-900 text-white']"
                 @click="setTransformMode('translate')" title="移动 (T)">移</button>
