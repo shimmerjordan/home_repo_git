@@ -296,8 +296,11 @@ export function defaultChildY(parentLoc, level = 0) {
   return 0                                            // inside (room floor or container bottom)
 }
 
-// Walk parent chain → world coords. `info.y` is the child's anchor (bottom of its box),
-// so Scene3D should add geo.h / 2 to render the mesh center.
+// Walk parent chain → world coords WITH composed rotation. `info.y` is the
+// child's anchor (bottom of its box) and `info.rotDeg` is the cumulative Y rotation
+// of all ancestors plus this loc's own rotation. The horizontal offset (xOff, zOff)
+// of each child is rotated by the parent's COMPOSED rotation before being added,
+// so a child correctly orbits with its parent when the parent is turned 90°.
 export function buildWorldMap(locations) {
   const byId = new Map(locations.map((l) => [l.id, l]))
   const result = new Map()
@@ -308,17 +311,15 @@ export function buildWorldMap(locations) {
     if (!loc) return null
     const g = effectiveGeometry(loc)
     const parent = loc.parent_id ? compute(loc.parent_id) : null
-    const base = parent ? parent : { x: 0, y: 0, z: 0, geo: null }
+    const base = parent ? parent : { x: 0, y: 0, z: 0, geo: null, rotDeg: 0 }
 
     let xOff = g.x
     let yOff = g.y
+    let zOff = g.z
 
     if (parent?.geo) {
-      // Multi-level parent → override y from level
       if (parent.geo.levels >= 2 && g.level) {
         yOff = levelY(parent.geo.h, parent.geo.levels, g.level)
-
-        // If this child has a slot, pack siblings on same layer left → right by slot.
         if (g.slot) {
           const sibs = locations
             .filter((l) => l.parent_id === loc.parent_id
@@ -328,23 +329,24 @@ export function buildWorldMap(locations) {
           let cursor = -parent.geo.w / 2
           for (const s of sibs) {
             const sg = effectiveGeometry(s)
-            if (s.id === loc.id) {
-              xOff = cursor + sg.w / 2
-              break
-            }
+            if (s.id === loc.id) { xOff = cursor + sg.w / 2; break }
             cursor += sg.w
           }
         }
       }
     }
 
-    const out = {
-      x: base.x + xOff,
-      y: base.y + yOff,
-      z: base.z + g.z,
-      geo: g,
-      loc,
-    }
+    // Rotate the horizontal local offset by the parent's COMPOSED rotation so
+    // children orbit correctly when the parent is turned. Y offset is vertical
+    // and unaffected by Y-axis rotation.
+    const parentRotRad = (base.rotDeg || 0) * Math.PI / 180
+    const cs = Math.cos(parentRotRad), sn = Math.sin(parentRotRad)
+    const wx = base.x + (xOff * cs - zOff * sn)
+    const wz = base.z + (xOff * sn + zOff * cs)
+    const wy = base.y + yOff
+    const rotDeg = (base.rotDeg || 0) + (g.rot || 0)
+
+    const out = { x: wx, y: wy, z: wz, geo: g, loc, rotDeg }
     result.set(id, out)
     return out
   }

@@ -28,6 +28,13 @@ const mouse = ref({ x: 0, z: 0 })
 const svgRef = ref(null)
 const vb = ref({ x: -10, z: -10, w: 20, d: 20 })
 const snapGuides = ref([])
+
+// View lock — prevents accidental drags/edits. When on, you can only pan the
+// canvas and zoom. Persisted per-device in localStorage.
+const LOCK_KEY = 'storage.plan.locked'
+const locked = ref(false)
+try { locked.value = localStorage.getItem(LOCK_KEY) === '1' } catch {}
+watch(locked, (v) => { try { localStorage.setItem(LOCK_KEY, v ? '1' : '0') } catch {} })
 // Polygon-room building state. While the user is clicking vertices, we store
 // world-coord points here. Closing (clicking near the first vertex or pressing
 // Enter) commits a new room with a `polygon` geometry.
@@ -64,7 +71,10 @@ const renderables = computed(() => {
       icon: cat?.icon || '📍', label: info.loc.name,
       x: info.x, z: info.z, worldY: info.y,
       w: info.geo.w, d: info.geo.d, h: info.geo.h,
-      rot: info.geo.rot || 0,
+      // COMPOSED rotation (own + every ancestor). This is the angle the SVG
+      // <g> applies so children visually orbit when their parent is rotated.
+      rot: info.rotDeg || 0,
+      ownRot: info.geo.rot || 0,
       color: info.geo.color,
       isRoom: !!cat?.isRoom,
       levels: info.geo.levels,
@@ -363,16 +373,29 @@ async function persistMove(loc, newWorldX, newWorldZ, newRot) {
     newY = defaultChildY(newParentLoc, newLevel)
   }
 
-  // IMPORTANT: spread the raw stored geometry first so custom fields (e.g. `polygon`
-  // for non-rectangular rooms) are preserved across move/rotate operations. Without
-  // the spread, dragging an L-shaped room would re-save it as a plain rectangle.
+  // Convert (newWorldX, newWorldZ) into the new parent's LOCAL frame, undoing
+  // the parent's composed rotation. Likewise convert the rotation gizmo's WORLD
+  // angle into the loc's OWN rotation by subtracting the parent's composed rot.
+  const parentRotDeg = newParentInfo?.rotDeg || 0
+  const a = -parentRotDeg * Math.PI / 180
+  const cs = Math.cos(a), sn = Math.sin(a)
+  const dx = newParentInfo ? newWorldX - newParentInfo.x : newWorldX
+  const dz = newParentInfo ? newWorldZ - newParentInfo.z : newWorldZ
+  const localX = newParentInfo ? dx * cs - dz * sn : dx
+  const localZ = newParentInfo ? dx * sn + dz * cs : dz
+  const ownRot = (newRot != null)
+    ? ((newRot - parentRotDeg) % 360 + 360) % 360
+    : old.rot
+
+  // IMPORTANT: spread the raw stored geometry first so custom fields (e.g. `polygon`)
+  // are preserved across move/rotate operations.
   const geo = {
     ...(loc.geometry || {}),
-    x: newParentInfo ? newWorldX - newParentInfo.x : newWorldX,
+    x: localX,
     y: newY,
-    z: newParentInfo ? newWorldZ - newParentInfo.z : newWorldZ,
+    z: localZ,
     w: old.w, h: old.h, d: old.d,
-    rot: (newRot != null) ? newRot : old.rot,
+    rot: ownRot,
     color: old.color,
     levels: old.levels,
     level: newLevel,
@@ -489,6 +512,24 @@ function onPointerDown(ev) {
   const handleEl = ev.target.closest?.('[data-role]')
   const role = handleEl?.dataset.role
   const locId = handleEl ? +handleEl.dataset.locId : null
+
+  // 🔒 Lock mode: refuse every shape-editing gesture and fall straight through
+  // to background-pan. Tap on a shape simply selects it (so users can still
+  // inspect things). Wheel zoom is always allowed (separate handler).
+  if (locked.value) {
+    if (role === 'shape' && locId && tool.value === 'select') {
+      emit('select', locId)
+      // Fall through to start a pan gesture so the user can grab + drag.
+    }
+    drag.value = {
+      type: 'pan',
+      vbX: vb.value.x, vbZ: vb.value.z,
+      startClientX: ev.clientX, startClientY: ev.clientY,
+      moved: 0,
+    }
+    svgRef.value.setPointerCapture?.(ev.pointerId)
+    return
+  }
 
   if (role === 'rotate' && locId) {
     const r = renderables.value.find((x) => x.id === locId)
@@ -707,10 +748,15 @@ function fitAll() {
 function onKey(ev) {
   const t = ev.target?.tagName
   if (t === 'INPUT' || t === 'TEXTAREA' || t === 'SELECT') return
+  // Escape always works (cancel/deselect even when locked).
   if (ev.key === 'Escape') {
     if (polyPoints.value.length) { cancelPolygon(); return }
     emit('select', null); tool.value = 'select'; drag.value = null
-  } else if (ev.key === 'Enter' && tool.value === 'room-poly' && polyPoints.value.length >= 3) {
+    return
+  }
+  // All other shortcuts are editing actions — block them while locked.
+  if (locked.value) return
+  if (ev.key === 'Enter' && tool.value === 'room-poly' && polyPoints.value.length >= 3) {
     finishPolygon()
   } else if (ev.key === 'Backspace' && tool.value === 'room-poly' && polyPoints.value.length) {
     polyPoints.value = polyPoints.value.slice(0, -1)
@@ -721,6 +767,7 @@ function onKey(ev) {
     if (r) {
       const loc = props.locations.find((l) => l.id === r.id)
       const w = worldMap.value.get(loc.id)
+      // Pass the new WORLD rotation (current + 15°); persistMove converts to own rot.
       persistMove(loc, w.x, w.z, (r.rot + 15) % 360)
     }
   }
@@ -773,27 +820,38 @@ const ghost = computed(() => {
   <div class="flex flex-col gap-2">
     <!-- Toolbar: horizontal scroll, compact icons (labels hidden on narrow screens) -->
     <div class="card p-1.5 flex items-center gap-1 overflow-x-auto no-scrollbar" style="touch-action: pan-x">
+      <button :class="['btn text-xs flex-shrink-0',
+                       locked ? 'bg-amber-100 text-amber-800 border border-amber-300' : 'btn-secondary']"
+              :title="locked ? '当前已锁定 — 仅支持平移和缩放。点击解锁' : '锁定视图 — 防止误拖动'"
+              @click="locked = !locked">
+        {{ locked ? '🔒' : '🔓' }}<span class="hidden sm:inline ml-1">{{ locked ? '已锁定' : '锁定' }}</span>
+      </button>
+      <span class="w-px h-6 bg-slate-200 mx-0.5 flex-shrink-0"></span>
       <button :class="['btn text-xs flex-shrink-0', tool==='select' ? 'btn-primary' : 'btn-secondary']"
+              :disabled="locked"
               title="选择 / 移动 / 平移画布"
               @click="tool='select'">↖<span class="hidden sm:inline ml-1">选择</span></button>
       <button :class="['btn text-xs flex-shrink-0', tool==='room-poly' ? 'btn-primary' : 'btn-secondary']"
+              :disabled="locked"
               title="多边形房间: 点击逐个加顶点, 点回起点 / 按 Enter 闭合"
               @click="tool='room-poly'; polyPoints = []">🔷<span class="hidden md:inline ml-1">多边形</span></button>
       <span class="w-px h-6 bg-slate-200 mx-0.5 flex-shrink-0"></span>
       <button v-for="c in FURNITURE_CATALOG" :key="c.kind"
               :class="['btn text-xs flex-shrink-0', tool===c.kind ? 'btn-primary' : 'btn-secondary']"
+              :disabled="locked"
               :title="`${c.label} (${c.w}×${c.d}m${c.levels >= 2 ? `, ${c.levels}层` : ''})`"
               @click="tool = c.kind">
         <span class="text-base leading-none">{{ c.icon }}</span><span class="hidden md:inline ml-1">{{ c.label }}</span>
       </button>
       <span class="flex-1 min-w-2"></span>
       <button class="btn btn-secondary text-xs flex-shrink-0" @click="fitAll" title="重置视野">⤢</button>
-      <button class="btn btn-danger text-xs flex-shrink-0" :disabled="!selectedId" @click="deleteSelected" title="删除选中">🗑</button>
+      <button class="btn btn-danger text-xs flex-shrink-0" :disabled="locked || !selectedId" @click="deleteSelected" title="删除选中">🗑</button>
     </div>
 
     <div class="text-xs text-slate-500 flex justify-between gap-2">
       <span class="truncate">
-        <template v-if="tool==='room'">📐 拖拽画矩形房间</template>
+        <template v-if="locked">🔒 已锁定 — 只能平移画布和滚轮缩放 (点选物体仅查看)</template>
+        <template v-else-if="tool==='room'">📐 拖拽画矩形房间</template>
         <template v-else-if="tool==='room-poly'">
           🔷 点击逐个加顶点 ({{ polyPoints.length }} 点) · 点回起点 / 按 Enter 闭合 · Esc 取消 · Backspace 撤一点
         </template>

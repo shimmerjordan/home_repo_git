@@ -217,7 +217,9 @@ function rebuild() {
     })
     const mesh = new THREE.Mesh(bodyGeo, mat)
     mesh.position.set(info.x, meshY, info.z)
-    mesh.rotation.y = (geo.rot || 0) * Math.PI / 180
+    // Use the COMPOSED rotation (own rot + every ancestor's rot) so a box inside
+    // a 90°-rotated cabinet visibly turns with it.
+    mesh.rotation.y = (info.rotDeg || 0) * Math.PI / 180
     mesh.userData = { type: 'location', id }
     mesh.renderOrder = 1
 
@@ -715,13 +717,24 @@ function commitTransform() {
     newLevel = 0
   }
 
+  // Convert mesh world transform back to the parent's LOCAL frame, undoing the
+  // parent's COMPOSED rotation. We saved that into locMeshes' info via buildWorldMap.
+  const parentRotDeg = newParentInfo?.locInfo?.rotDeg || 0
+  const inv = -parentRotDeg * Math.PI / 180
+  const cs2 = Math.cos(inv), sn2 = Math.sin(inv)
+  const dxw = ax - parentAx, dzw = az - parentAz
+  const lxFinal = newParentInfo ? dxw * cs2 - dzw * sn2 : dxw
+  const lzFinal = newParentInfo ? dxw * sn2 + dzw * cs2 : dzw
+  const worldRotDeg = ((mesh.rotation.y * 180 / Math.PI) % 360 + 360) % 360
+  const ownRotDeg = ((worldRotDeg - parentRotDeg) % 360 + 360) % 360
+
   const newGeo = {
     ...(loc.geometry || {}),
-    x: ax - parentAx,
+    x: lxFinal,
     // When parent has levels, y is overridden by buildWorldMap from `level`. Still record raw y as fallback.
     y: ay - parentAy,
-    z: az - parentAz,
-    rot: ((mesh.rotation.y * 180 / Math.PI) % 360 + 360) % 360,
+    z: lzFinal,
+    rot: ownRotDeg,
     w: newW, h: newH, d: newD,
     color: info.geo.color,
     levels: info.geo.levels,
