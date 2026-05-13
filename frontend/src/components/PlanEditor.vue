@@ -290,9 +290,24 @@ async function placeFurniture(kind, x, z) {
   const y = defaultChildY(parentLoc, level)
   const localX = parentInfo ? x - parentInfo.x : x
   const localZ = parentInfo ? z - parentInfo.z : z
+
+  // Auto-fit dimensions to the parent's available slot — keeps a nested 收纳箱
+  // from poking out of the cabinet/box it's inside. Honours the smaller of the
+  // catalog default and the available space (so we never blow it UP, only shrink).
+  let fitW = cat.w, fitH = cat.h, fitD = cat.d
+  if (parentGeo) {
+    const margin = 0.04                                                       // 4 cm clearance per side
+    const slotH = parentGeo.levels >= 2
+      ? Math.max(0.04, parentGeo.h / parentGeo.levels - 0.04)                 // one layer's height
+      : Math.max(0.05, parentGeo.h - margin)
+    fitW = Math.min(cat.w, Math.max(0.05, parentGeo.w - margin))
+    fitD = Math.min(cat.d, Math.max(0.05, parentGeo.d - margin))
+    fitH = Math.min(cat.h, slotH)
+  }
+
   const geometry = {
     x: localX, y, z: localZ,
-    w: cat.w, h: cat.h, d: cat.d, rot: 0, color: cat.color,
+    w: fitW, h: fitH, d: fitD, rot: 0, color: cat.color,
     levels: cat.levels || 0,
     level: level || 0,
     slot: 0,

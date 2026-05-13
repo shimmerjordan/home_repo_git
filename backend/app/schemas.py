@@ -155,3 +155,20 @@ class VoiceConfigPatch(BaseModel):
 class ConfigPatch(BaseModel):
     llm: Optional[LLMConfigPatch] = None
     voice: Optional[VoiceConfigPatch] = None
+
+
+# --- Audit log ---
+
+class AuditLogOut(BaseModel):
+    id: int
+    ts: datetime
+    entity_type: str
+    entity_id: Optional[int] = None
+    entity_name: str = ""
+    action: str
+    changes: dict[str, Any] = {}
+    summary: str = ""
+    source: str = ""
+
+    class Config:
+        from_attributes = True

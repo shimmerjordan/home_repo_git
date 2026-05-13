@@ -48,6 +48,23 @@ class Item(Base):
     transactions = relationship("Transaction", back_populates="item", cascade="all, delete-orphan")
 
 
+class AuditLog(Base):
+    """Append-only audit trail of every mutation we make to locations / items /
+    items' transactional state. Pairs with /api/audit so the user can scrub back
+    through "who changed what when", git-blame style."""
+    __tablename__ = "audit_log"
+
+    id = Column(Integer, primary_key=True)
+    ts = Column(DateTime, default=datetime.now, index=True)
+    entity_type = Column(String(40), index=True)     # 'location' / 'item' / 'transaction'
+    entity_id = Column(Integer, index=True, nullable=True)
+    entity_name = Column(String(200), default="")
+    action = Column(String(40), index=True)          # 'create' / 'update' / 'delete' / 'restore'
+    changes = Column(Text, default="")               # JSON: { field: [oldVal, newVal] }
+    summary = Column(Text, default="")               # one-line human description
+    source = Column(String(40), default="ui")        # 'ui' / 'voice' / 'import' ...
+
+
 class Transaction(Base):
     """Take-out / put-in records."""
     __tablename__ = "transactions"

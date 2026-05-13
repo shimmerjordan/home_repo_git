@@ -7,6 +7,7 @@ import SettingsPanel from './components/SettingsPanel.vue'
 import TransactionFeed from './components/TransactionFeed.vue'
 import LogsPanel from './components/LogsPanel.vue'
 import BuildingPanel from './components/BuildingPanel.vue'
+import AuditPanel from './components/AuditPanel.vue'
 import { api } from './api'
 
 const tab = ref('voice')
@@ -26,6 +27,7 @@ const tabs = [
   { id: 'locations', label: '位置', icon: '🗂' },
   { id: 'building', label: '3D', icon: '🏗' },
   { id: 'log', label: '记录', icon: '📜' },
+  { id: 'audit', label: '变更', icon: '🕓' },
   { id: 'logs', label: '诊断', icon: '🔧' },
   { id: 'settings', label: '设置', icon: '⚙' },
 ]
@@ -54,6 +56,7 @@ const tabs = [
       <LocationManager v-show="tab==='locations'" :refresh-key="refreshKey" @changed="bumpRefresh" />
       <BuildingPanel v-show="tab==='building'" :refresh-key="refreshKey" @changed="bumpRefresh" />
       <TransactionFeed v-show="tab==='log'" :refresh-key="refreshKey" />
+      <AuditPanel v-show="tab==='audit'" :refresh-key="refreshKey" />
       <LogsPanel v-show="tab==='logs'" />
       <SettingsPanel v-show="tab==='settings'" @saved="loadSettings" />
     </main>

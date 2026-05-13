@@ -120,6 +120,11 @@ function openEdit(node) {
     kind: node.kind || 'box',
     parent_id: node.parent_id || null,
     note: node.note || '',
+    // mm units in the modal — easier on the eyes than 0.05 m and friends.
+    w_mm: Math.round(g.w * 1000),
+    h_mm: Math.round(g.h * 1000),
+    d_mm: Math.round(g.d * 1000),
+    rot: g.rot || 0,
     levelTrio: {
       levels: g.levels || 0,
       level: g.level || 0,
@@ -162,18 +167,27 @@ async function saveEdit() {
   const wantLevels = +f.levelTrio.levels || 0
   const wantLevel = +f.levelTrio.level || 0
   const wantSlot = +f.levelTrio.slot || 0
-  const wantY = ((+f.levelTrio.mount_y_mm) || 0) / 1000   // mm → m
+  const wantY = ((+f.levelTrio.mount_y_mm) || 0) / 1000
+  const wantW = Math.max(0.05, (+f.w_mm || 0) / 1000)
+  const wantH = Math.max(0.05, (+f.h_mm || 0) / 1000)
+  const wantD = Math.max(0.05, (+f.d_mm || 0) / 1000)
+  const wantRot = +f.rot || 0
   const cur = effectiveGeometry(editing.value)
-  if (
+  const geomChanged =
     wantLevels !== (cur.levels || 0) ||
     wantLevel !== (cur.level || 0) ||
     wantSlot !== (cur.slot || 0) ||
-    Math.abs(wantY - (+curGeo.y || 0)) > 1e-6
-  ) {
+    Math.abs(wantY - (+curGeo.y || 0)) > 1e-6 ||
+    Math.abs(wantW - cur.w) > 1e-6 ||
+    Math.abs(wantH - cur.h) > 1e-6 ||
+    Math.abs(wantD - cur.d) > 1e-6 ||
+    Math.abs(wantRot - cur.rot) > 1e-6
+  if (geomChanged) {
     patch.geometry = {
       ...curGeo,
-      x: cur.x, z: cur.z, w: cur.w, h: cur.h, d: cur.d, rot: cur.rot, color: cur.color,
+      x: cur.x, z: cur.z, color: cur.color,
       y: wantY,
+      w: wantW, h: wantH, d: wantD, rot: wantRot,
       levels: wantLevels,
       level: wantLevel,
       slot: wantSlot,
@@ -306,6 +320,27 @@ function up() {
             </select>
             <div class="text-xs text-slate-500 mt-1">不能移到自己的子目录(已自动过滤)。</div>
           </div>
+          <!-- Container dimensions (mm). Edit here directly so users don't have to
+               flip to the 3D page just to resize a 收纳箱 / cabinet. -->
+          <div class="grid grid-cols-4 gap-2">
+            <div>
+              <label class="label">宽 w (mm)</label>
+              <input v-model.number="editForm.w_mm" type="number" step="10" min="50" class="input" />
+            </div>
+            <div>
+              <label class="label">高 h (mm)</label>
+              <input v-model.number="editForm.h_mm" type="number" step="10" min="50" class="input" />
+            </div>
+            <div>
+              <label class="label">深 d (mm)</label>
+              <input v-model.number="editForm.d_mm" type="number" step="10" min="50" class="input" />
+            </div>
+            <div>
+              <label class="label">朝向°</label>
+              <input v-model.number="editForm.rot" type="number" step="5" class="input" />
+            </div>
+          </div>
+
           <LevelSlotFields v-model="editForm.levelTrio"
                            :selected-loc="editing"
                            :parent-loc="editParent"

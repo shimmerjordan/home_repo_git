@@ -6,6 +6,7 @@ from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
 
 from .database import Base, engine
+from .routers import audit as audit_router
 from .routers import diag as diag_router
 from .routers import items as items_router
 from .routers import locations as locations_router
@@ -71,6 +72,7 @@ app.include_router(locations_router.router)
 app.include_router(voice_router.router)
 app.include_router(settings_router.router)
 app.include_router(diag_router.router)
+app.include_router(audit_router.router)
 
 
 @app.middleware("http")

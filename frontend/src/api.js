@@ -47,6 +47,14 @@ export const api = {
     return request(`/api/transactions${qs ? '?' + qs : ''}`)
   },
 
+  // audit
+  listAudit: (params = {}) => {
+    const qs = new URLSearchParams(
+      Object.entries(params).filter(([, v]) => v !== undefined && v !== null && v !== '')
+    ).toString()
+    return request(`/api/audit${qs ? '?' + qs : ''}`)
+  },
+
   // diagnostics
   getDiag: () => request('/api/diag'),
   getLogs: (sinceId = 0, level = '') =>

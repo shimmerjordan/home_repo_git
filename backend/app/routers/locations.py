@@ -5,6 +5,7 @@ from sqlalchemy.orm import Session
 
 from .. import models, schemas
 from ..database import get_db
+from ..services import audit
 from ..services.inventory import serialize_location
 
 router = APIRouter(prefix="/api/locations", tags=["locations"])
@@ -28,6 +29,9 @@ def create_location(payload: schemas.LocationCreate, db: Session = Depends(get_d
     data = _payload_to_db(payload.model_dump())
     loc = models.Location(**data)
     db.add(loc)
+    db.flush()
+    audit.log(db, "location", loc.id, "create", name=loc.name,
+              after=serialize_location(loc))
     db.commit()
     db.refresh(loc)
     return serialize_location(loc)
@@ -38,9 +42,13 @@ def update_location(loc_id: int, payload: schemas.LocationUpdate, db: Session = 
     loc = db.get(models.Location, loc_id)
     if not loc:
         raise HTTPException(404, "location not found")
+    before = serialize_location(loc)
     data = _payload_to_db(payload.model_dump(exclude_unset=True))
     for k, v in data.items():
         setattr(loc, k, v)
+    db.flush()
+    after = serialize_location(loc)
+    audit.log(db, "location", loc.id, "update", name=loc.name, before=before, after=after)
     db.commit()
     db.refresh(loc)
     return serialize_location(loc)
@@ -51,10 +59,14 @@ def delete_location(loc_id: int, db: Session = Depends(get_db)):
     loc = db.get(models.Location, loc_id)
     if not loc:
         raise HTTPException(404, "location not found")
+    before = serialize_location(loc)
+    name = loc.name
     for it in list(loc.items):
         it.location_id = None
     for child in list(loc.children):
         child.parent_id = loc.parent_id
     db.delete(loc)
+    db.flush()
+    audit.log(db, "location", loc_id, "delete", name=name, before=before)
     db.commit()
     return {"ok": True}

@@ -9,6 +9,7 @@ from sqlalchemy.orm import Session
 
 from .. import models, schemas
 from ..database import get_db
+from ..services import audit
 from ..services.inventory import (
     location_path,
     search_items,
@@ -238,6 +239,8 @@ def create_item(payload: schemas.ItemCreate, db: Session = Depends(get_db)):
         quantity=item.quantity, location_id=item.location_id,
         note="手动创建",
     ))
+    audit.log(db, "item", item.id, "create", name=item.name,
+              after=serialize_item(item))
     db.commit()
     db.refresh(item)
     return serialize_item(item)
@@ -256,9 +259,13 @@ def update_item(item_id: int, payload: schemas.ItemUpdate, db: Session = Depends
     item = db.get(models.Item, item_id)
     if not item:
         raise HTTPException(404, "item not found")
+    before = serialize_item(item)
     for k, v in payload.model_dump(exclude_unset=True).items():
         setattr(item, k, v)
     item.updated_at = datetime.now()
+    db.flush()
+    audit.log(db, "item", item.id, "update", name=item.name,
+              before=before, after=serialize_item(item))
     db.commit()
     db.refresh(item)
     return serialize_item(item)
@@ -269,7 +276,11 @@ def delete_item(item_id: int, db: Session = Depends(get_db)):
     item = db.get(models.Item, item_id)
     if not item:
         raise HTTPException(404, "item not found")
+    before = serialize_item(item)
+    name = item.name
     db.delete(item)
+    db.flush()
+    audit.log(db, "item", item_id, "delete", name=name, before=before)
     db.commit()
     return {"ok": True}
 
@@ -297,6 +308,11 @@ def record_transaction(
     item.updated_at = datetime.now()
     tx = models.Transaction(**payload.model_dump())
     db.add(tx)
+    db.flush()
+    audit.log(db, "transaction", tx.id, payload.action,
+              name=item.name,
+              after={"action": payload.action, "qty": payload.quantity,
+                     "remaining": item.quantity, "note": payload.note or ""})
     db.commit()
     db.refresh(tx)
     return serialize_transaction(tx)
