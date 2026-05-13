@@ -117,13 +117,19 @@ class IntentCandidate(BaseModel):
     score: float
 
 
+class IntentRecommendation(BaseModel):
+    item_id: int
+    purpose: str = ""
+
+
 class IntentResult(BaseModel):
-    intent: str  # find / take_out / put_in / list / unknown / clarify
+    intent: str  # find / take_out / put_in / list / assist / unknown / clarify
     confidence: float
     speech: str  # what to read out loud to the user
     needs_confirmation: bool = False
     pending_action: Optional[dict[str, Any]] = None  # to replay if user confirms
     candidates: list[IntentCandidate] = []
+    recommendations: list[IntentRecommendation] = []
     executed: bool = False
     transaction_id: Optional[int] = None
     raw: Optional[dict[str, Any]] = None
@@ -138,6 +144,8 @@ class LLMConfigPatch(BaseModel):
     temperature: Optional[float] = None
     timeout: Optional[int] = None
     supports_tools: Optional[bool] = None
+    max_tokens: Optional[int] = None
+    fast_mode: Optional[bool] = None
 
 
 class VoiceConfigPatch(BaseModel):

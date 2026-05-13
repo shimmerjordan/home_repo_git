@@ -1,5 +1,5 @@
 <script setup>
-import { ref, onMounted } from 'vue'
+import { ref, onMounted, onBeforeUnmount } from 'vue'
 import VoicePanel from './components/VoicePanel.vue'
 import ItemList from './components/ItemList.vue'
 import LocationManager from './components/LocationManager.vue'
@@ -21,6 +21,40 @@ onMounted(loadSettings)
 
 function bumpRefresh() { refreshKey.value += 1 }
 
+// Fullscreen toggle — modern API + iOS webkit fallback. iPad Safari < 16.4 has no
+// real fullscreen, so on those devices we toggle a CSS class to hide the page chrome.
+const isFullscreen = ref(false)
+function _fsElement() {
+  return document.fullscreenElement || document.webkitFullscreenElement || null
+}
+function syncFs() { isFullscreen.value = !!_fsElement() || document.documentElement.classList.contains('faux-fullscreen') }
+async function toggleFullscreen() {
+  const el = document.documentElement
+  const inFs = !!_fsElement()
+  try {
+    if (inFs) {
+      const ex = document.exitFullscreen || document.webkitExitFullscreen
+      if (ex) await ex.call(document)
+    } else {
+      const rq = el.requestFullscreen || el.webkitRequestFullscreen
+      if (rq) { await rq.call(el); return syncFs() }
+      // Fallback for iPad Safari without fullscreen API.
+      el.classList.toggle('faux-fullscreen')
+    }
+  } catch {
+    el.classList.toggle('faux-fullscreen')
+  }
+  syncFs()
+}
+onMounted(() => {
+  document.addEventListener('fullscreenchange', syncFs)
+  document.addEventListener('webkitfullscreenchange', syncFs)
+})
+onBeforeUnmount(() => {
+  document.removeEventListener('fullscreenchange', syncFs)
+  document.removeEventListener('webkitfullscreenchange', syncFs)
+})
+
 const tabs = [
   { id: 'voice', label: '语音', icon: '🎙' },
   { id: 'items', label: '物品', icon: '📦' },
@@ -37,7 +71,14 @@ const tabs = [
   <div class="min-h-full flex flex-col">
     <header class="bg-slate-900 text-white px-3 py-2 sm:px-4 sm:py-3 sticky top-0 z-10">
       <div class="flex items-center justify-between gap-2 flex-wrap">
-        <div class="font-semibold flex items-center gap-2 shrink-0">🏠 语音仓储管家</div>
+        <div class="font-semibold flex items-center gap-2 shrink-0">
+          🏠 语音仓储管家
+          <button @click="toggleFullscreen"
+            class="ml-1 px-2 py-1 rounded text-xs bg-white/10 hover:bg-white/20"
+            :title="isFullscreen ? '退出全屏' : '全屏显示'">
+            {{ isFullscreen ? '⤡' : '⤢' }}
+          </button>
+        </div>
         <!-- Horizontal scroll on iPad portrait so tabs always fit; labels collapse to icons on narrow widths. -->
         <nav class="flex gap-1 text-sm overflow-x-auto -mx-1 px-1 no-scrollbar">
           <button v-for="t in tabs" :key="t.id"

@@ -23,7 +23,11 @@ from .client import LLMClient, LLMError
 SYSTEM_PROMPT = """你是家庭仓储管家的语义解析器, 同时要给出温暖、口语化的中文回答。
 你的工作:
 1. 阅读用户语句和当前的库存摘要
-2. 选择一个意图: find / take_out / put_in / list / create_item / unknown
+2. 选择一个意图: find / take_out / put_in / list / create_item / assist / unknown
+   - assist: 用户表达"需求/症状/问题"(如 "我发烧了家里有什么药"、"想擦地板用什么"),
+     需要你从库存里挑选可能解决该需求的所有相关物品。把 item_id 全部放进 candidates,
+     并在 recommendations 里给出 [{item_id, purpose}] 说明每件物品的用途, speech 用一句
+     人话总结(如"家里有这几样可以试: 布洛芬退烧 / 体温计 / 维C")
 3. 在候选物品中匹配用户最可能指的物品(基于名称/别名/分类/上下文做语义匹配)
 4. 给出 0~1 之间的 confidence:
    - 物品名/位置和用户说法明确一致 -> 0.9+
@@ -71,7 +75,7 @@ TOOLS = [
                 "properties": {
                     "intent": {
                         "type": "string",
-                        "enum": ["find", "take_out", "put_in", "list", "create_item", "unknown"],
+                        "enum": ["find", "take_out", "put_in", "list", "create_item", "assist", "unknown"],
                     },
                     "confidence": {"type": "number", "minimum": 0, "maximum": 1},
                     "speech": {"type": "string"},
@@ -84,6 +88,18 @@ TOOLS = [
                         "items": {"type": "integer"},
                         "default": [],
                     },
+                    "recommendations": {
+                        "type": "array",
+                        "items": {
+                            "type": "object",
+                            "properties": {
+                                "item_id": {"type": "integer"},
+                                "purpose": {"type": "string"},
+                            },
+                            "required": ["item_id", "purpose"],
+                        },
+                        "default": [],
+                    },
                     "reasoning": {"type": "string"},
                 },
                 "required": ["intent", "confidence", "speech"],
@@ -94,7 +110,7 @@ TOOLS = [
 
 
 async def parse_intent(text: str, db: Session, cfg: AppConfig) -> dict[str, Any]:
-    summary = build_summary(db, text)
+    summary = build_summary(db, text, fast_mode=cfg.llm.fast_mode)
 
     user_msg = (
         f"用户语句: {text}\n\n"
@@ -131,6 +147,7 @@ async def parse_intent(text: str, db: Session, cfg: AppConfig) -> dict[str, Any]
     parsed.setdefault("speech", "")
     parsed.setdefault("quantity", 1)
     parsed.setdefault("candidates", [])
+    parsed.setdefault("recommendations", [])
     return {"parsed": parsed, "summary": summary}
 
 
@@ -152,6 +169,15 @@ def execute_intent(
     speech = parsed.get("speech", "")
     threshold = cfg.voice.confidence_threshold
 
+    recs = parsed.get("recommendations") or []
+    rec_purpose_by_id: dict[int, str] = {}
+    for r in recs:
+        try:
+            rid = int(r.get("item_id"))
+            rec_purpose_by_id[rid] = str(r.get("purpose") or "")
+        except (TypeError, ValueError):
+            continue
+
     base = {
         "intent": intent,
         "confidence": confidence,
@@ -159,6 +185,7 @@ def execute_intent(
         "needs_confirmation": False,
         "pending_action": None,
         "candidates": [],
+        "recommendations": [],
         "executed": False,
         "transaction_id": None,
         "raw": parsed,
@@ -168,6 +195,9 @@ def execute_intent(
     cand_ids = parsed.get("candidates") or []
     if parsed.get("item_id") and parsed["item_id"] not in cand_ids:
         cand_ids = [parsed["item_id"], *cand_ids]
+    # For assist intent, treat recommendations as the canonical candidate list.
+    if intent == "assist":
+        cand_ids = list(rec_purpose_by_id.keys()) or cand_ids
     candidates_objs = _candidate_objects(db, cand_ids, text)
     base["candidates"] = [
         {
@@ -178,6 +208,22 @@ def execute_intent(
         }
         for idx, it in enumerate(candidates_objs)
     ]
+    if rec_purpose_by_id:
+        # Order recommendations to match the candidate sort, then trail any extras.
+        ordered_ids = [it.id for it in candidates_objs if it.id in rec_purpose_by_id]
+        for rid in rec_purpose_by_id:
+            if rid not in ordered_ids:
+                ordered_ids.append(rid)
+        base["recommendations"] = [
+            {"item_id": rid, "purpose": rec_purpose_by_id.get(rid, "")}
+            for rid in ordered_ids
+        ]
+
+    if intent == "assist":
+        if not base["speech"]:
+            names = [c["item_name"] for c in base["candidates"][:5]]
+            base["speech"] = f"家里可能用得上的有: {', '.join(names) or '暂时没找到合适的'}"
+        return base
 
     # Low confidence -> ask the user to confirm rather than mutating data.
     if intent in {"take_out", "put_in"} and confidence < threshold:

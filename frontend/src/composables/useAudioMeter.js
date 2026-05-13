@@ -16,13 +16,35 @@ export function useAudioMeter({ bars = 32 } = {}) {
   async function start() {
     if (active.value) return
     error.value = ''
+    // iOS Safari quirks:
+    //   1. AudioContext MUST be created within a user-gesture frame, otherwise it stays
+    //      suspended and analyser bytes are all 0. We instantiate BEFORE the awaited
+    //      getUserMedia so we're still in the gesture stack.
+    //   2. AGC/NS/echoCancellation default ON, which on iPad squashes the meter to ~0
+    //      for normal voice. We disable them — Web Speech API has its own pipeline.
+    //   3. After getUserMedia we resume() explicitly; some iOS versions need both.
+    const Ctor = window.AudioContext || window.webkitAudioContext
+    if (!Ctor) { error.value = '浏览器不支持 AudioContext'; return }
+    ctx = new Ctor()
     try {
-      stream = await navigator.mediaDevices.getUserMedia({ audio: true })
+      stream = await navigator.mediaDevices.getUserMedia({
+        audio: {
+          echoCancellation: false,
+          noiseSuppression: false,
+          autoGainControl: false,
+        },
+      })
     } catch (e) {
-      error.value = String(e.message || e)
-      return
+      // Fall back to plain `audio: true` — older iOS rejects detailed constraints.
+      try {
+        stream = await navigator.mediaDevices.getUserMedia({ audio: true })
+      } catch (e2) {
+        error.value = String(e2.message || e2)
+        try { ctx.close() } catch {}
+        ctx = null
+        return
+      }
     }
-    ctx = new (window.AudioContext || window.webkitAudioContext)()
     if (ctx.state === 'suspended') { try { await ctx.resume() } catch {} }
     const src = ctx.createMediaStreamSource(stream)
     analyser = ctx.createAnalyser()

@@ -73,6 +73,8 @@ class LLMClient:
             "messages": messages,
             "temperature": self.cfg.temperature,
         }
+        if getattr(self.cfg, "max_tokens", 0):
+            payload["max_tokens"] = int(self.cfg.max_tokens)
 
         use_tools = bool(tools) and self.cfg.supports_tools
         if use_tools:

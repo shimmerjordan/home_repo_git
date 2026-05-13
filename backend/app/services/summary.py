@@ -13,12 +13,30 @@ from .inventory import location_path, search_items
 MAX_PREFILTER = 30
 MAX_OVERVIEW_CATS = 12
 MAX_RECENT = 8
+# When a need/question keyword is detected (e.g. "我发烧了", "有什么药吗") we widen the
+# context to ALL items (capped) so the LLM can reason semantically over the catalogue.
+NEED_KEYWORDS = ("需要", "有什么", "怎么", "推荐", "应该", "可以用", "可以吃", "可以治", "解决", "对付", "缓解", "舒缓", "止")
+QUESTION_HINTS = ("吗", "?", "？", "呢")
+ALL_ITEMS_CAP = 80
 
 
-def build_summary(db: Session, query: str) -> dict:
+def _looks_like_need(text: str) -> bool:
+    if not text:
+        return False
+    if any(k in text for k in NEED_KEYWORDS):
+        return True
+    # Question that's not "在哪/哪里" (those are clearly lookups).
+    if any(h in text for h in QUESTION_HINTS) and not ("在哪" in text or "哪里" in text):
+        return True
+    return False
+
+
+def build_summary(db: Session, query: str, *, fast_mode: bool = False) -> dict:
     """Return a structured summary string for the LLM."""
+    prefilter_cap = 12 if fast_mode else MAX_PREFILTER
     # Top-N items most relevant to the query (keyword pre-filter).
-    candidates = search_items(db, query, limit=MAX_PREFILTER)
+    candidates = search_items(db, query, limit=prefilter_cap)
+    need_mode = _looks_like_need(query)
 
     # Overview: category histogram + total counts.
     all_items: list[models.Item] = db.query(models.Item).all()
@@ -57,7 +75,19 @@ def build_summary(db: Session, query: str) -> dict:
             )
     else:
         lines.append("  (无关键词匹配，可能是新增或表达不准确)")
-    if recent_tx:
+    if need_mode:
+        # Full catalogue (capped) so the LLM can semantically pick relevant items for needs
+        # like "我发烧了有什么药" — keyword search alone misses these.
+        lines.append("")
+        lines.append(f"完整库存清单 (最多 {ALL_ITEMS_CAP} 件, 用于需求推荐):")
+        cand_ids = {it.id for it in candidates}
+        extras = [it for it in all_items if it.id not in cand_ids][: ALL_ITEMS_CAP - len(candidates)]
+        for it in candidates + extras:
+            lines.append(
+                f"  - id={it.id} 名={it.name} 类={it.category or '-'} 量={it.quantity} "
+                f"位={location_path(it.location) if it.location else '-'}"
+            )
+    if recent_tx and not fast_mode:
         lines.append("")
         lines.append("近期记录:")
         for tx in recent_tx:

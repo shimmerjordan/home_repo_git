@@ -21,6 +21,12 @@ class LLMConfig(BaseModel):
     # Some providers (Ollama old versions, certain inference servers) don't support tool calling.
     # When false, we fall back to JSON-mode prompting.
     supports_tools: bool = Field(default=True)
+    # Cap response tokens — a fast lightweight model can answer in <300 tokens easily;
+    # capping shaves latency on slow Chinese inference providers.
+    max_tokens: int = Field(default=512, ge=64, le=8192)
+    # Fast mode: shorter system prompt + smaller inventory summary. Set true when you've
+    # picked a light model (e.g. glm-4-flash, qwen2.5-7b) and want minimum latency.
+    fast_mode: bool = Field(default=False)
 
 
 class VoiceConfig(BaseModel):

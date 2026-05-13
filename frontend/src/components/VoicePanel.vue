@@ -1,5 +1,5 @@
 <script setup>
-import { ref, computed, watch, toRef, onMounted, onBeforeUnmount } from 'vue'
+import { ref, computed, watch, toRef, onMounted, onBeforeUnmount, nextTick } from 'vue'
 import { api } from '../api'
 import { useVoice } from '../composables/useVoice'
 import { useAudioMeter } from '../composables/useAudioMeter'
@@ -90,6 +90,12 @@ const sceneItems = ref([])
 const sceneHighlightItem = ref(null)
 const sceneHighlightIds = ref([])    // multiple targets when same-name items exist in different places
 const sceneHighlightLoc = ref(null)
+const sceneSection = ref(null)       // DOM ref for auto-scroll
+// "闭麦" — global mute. Blocks wake listening and push-to-talk until toggled off.
+// Useful when AI is speaking nearby and you don't want stray "确定/取消" pickups.
+const micMuted = ref(false)
+// Increments on every result; used to trigger scroll-into-view.
+const resultSeq = ref(0)
 
 async function loadScene() {
   try {
@@ -107,10 +113,34 @@ watch(() => props.refreshKey, () => { loadRecent(); loadScene() })
 // otherwise fight the explicit single highlight. Pickers set this flag once.
 let suppressNextAutoHighlight = false
 
+function scrollToScene() {
+  // Bring the 3D preview into view after a successful search/intent. Uses smooth scroll
+  // so the user sees the highlight appear contextually.
+  nextTick(() => {
+    const el = sceneSection.value
+    if (el && typeof el.scrollIntoView === 'function') {
+      el.scrollIntoView({ behavior: 'smooth', block: 'start' })
+    }
+  })
+}
+
 watch(() => result.value, (v) => {
   if (!v) return
+  resultSeq.value += 1
+  // Scroll into view whenever a new result lands AND there's something to look at.
+  if ((v.candidates?.length || 0) > 0 || v.executed) scrollToScene()
   if (suppressNextAutoHighlight) {
     suppressNextAutoHighlight = false
+    if (v.executed) loadScene()
+    return
+  }
+  // Assist intent: highlight ALL recommended items in 3D so the user can see them at a glance.
+  if (v.intent === 'assist' && v.recommendations?.length) {
+    sceneHighlightItem.value = null
+    sceneHighlightIds.value = []
+    setTimeout(() => {
+      sceneHighlightIds.value = v.recommendations.map((r) => r.item_id)
+    }, 50)
     if (v.executed) loadScene()
     return
   }
@@ -146,6 +176,10 @@ async function ensureMeter() {
   if (!meter.active.value) await meter.start()
 }
 
+// Abort signal — set when user taps mic during an in-flight command/process so we can
+// short-circuit the rest of the state machine.
+const abortRequested = ref(false)
+
 // ---- Wake mode toggle ----
 async function toggleWake() {
   if (wakeOn.value) {
@@ -153,9 +187,39 @@ async function toggleWake() {
     voice.stopWakeListening()
     if (phase.value === 'idle') meter.stop()
   } else {
+    if (micMuted.value) return
     wakeOn.value = true
     await ensureMeter()
     armWake()
+  }
+}
+
+// "闭麦" — hard-off. Stops everything in-flight and prevents any new SR until toggled.
+function toggleMute() {
+  micMuted.value = !micMuted.value
+  if (micMuted.value) {
+    if (wakeOn.value) { wakeOn.value = false; voice.stopWakeListening() }
+    abortCurrentCapture()
+    voice.cancelSpeak()
+    meter.stop()
+  }
+}
+
+// Allow user to abort while in 'command' (stops SR) / 'speaking' (cancels TTS) /
+// 'processing' (best-effort; will resolve naturally but TTS won't play).
+function abortCurrentCapture() {
+  if (phase.value === 'command') {
+    // useVoice doesn't expose an external abort, but stopping all SR effectively
+    // forces _captureWithSR's r.onend → finish('') path on the next tick.
+    voice.stopWakeListening()
+    try { voice.cancelSpeak() } catch {}
+    // Force phase reset; the in-flight capture promise will resolve to empty and
+    // captureCommand's "没听清" branch will run — speak that nothing to the user.
+    abortRequested.value = true
+  } else if (phase.value === 'speaking') {
+    voice.cancelSpeak()
+  } else if (phase.value === 'processing') {
+    abortRequested.value = true
   }
 }
 
@@ -174,7 +238,12 @@ watch(phase, (p) => { if (p === 'idle') armWake() })
 
 // ---- Push-to-talk ----
 async function pushToTalk() {
-  if (phase.value !== 'idle') return
+  if (micMuted.value) return
+  // Re-tap during command/speak/process => abort.
+  if (phase.value !== 'idle') {
+    abortCurrentCapture()
+    return
+  }
   voice.stopWakeListening() // make sure no SR is running
   await ensureMeter()
   await captureCommand('')
@@ -182,13 +251,16 @@ async function pushToTalk() {
 
 async function captureCommand(prefilledTail) {
   errorMsg.value = ''
+  abortRequested.value = false
   phase.value = 'command'
   transcript.value = ''
+  if (abortRequested.value || micMuted.value) { phase.value = 'idle'; return }
   // If the wake-detector handed us a tail like "充电宝在哪", skip a second SR roundtrip.
   if (prefilledTail && prefilledTail.length >= 2) {
     transcript.value = prefilledTail
   } else {
     const { text, blob, error: err } = await voice.captureUtterance({ timeout: 8000 })
+    if (abortRequested.value) { phase.value = 'idle'; return }
     if (err) {
       errorMsg.value = '识别失败: ' + err
       phase.value = 'idle'
@@ -238,8 +310,10 @@ async function captureCommand(prefilledTail) {
 
 async function runIntent() {
   phase.value = 'processing'
+  abortRequested.value = false
   try {
     const intent = await api.voiceIntent(transcript.value)
+    if (abortRequested.value) { phase.value = 'idle'; return }
     result.value = intent
     history.value.unshift({
       time: new Date(),
@@ -277,7 +351,7 @@ async function runIntent() {
       if (r2.speech) await voice.speak(r2.speech)
       if (r2.executed) emit('changed')
     } else {
-      if (intent.speech) await voice.speak(intent.speech)
+      if (intent.speech && !micMuted.value && !abortRequested.value) await voice.speak(intent.speech)
       if (intent.executed) emit('changed')
     }
   } catch (e) {
@@ -369,7 +443,20 @@ const phaseColor = computed(() => ({
   speaking: 'bg-cyan-400',
 }[phase.value]))
 
-const intentLabel = { find: '查找', take_out: '取出', put_in: '存入', list: '列表', create_item: '新增', unknown: '未知' }
+const intentLabel = { find: '查找', take_out: '取出', put_in: '存入', list: '列表', create_item: '新增', assist: '推荐', unknown: '未知' }
+
+function candidateNameOf(id) {
+  const c = (result.value?.candidates || []).find((x) => x.item_id === id)
+  if (c) return c.item_name
+  const it = sceneItems.value.find((x) => x.id === id)
+  return it?.name || '#' + id
+}
+function candidateLocOf(id) {
+  const c = (result.value?.candidates || []).find((x) => x.item_id === id)
+  if (c) return c.location_path
+  const it = sceneItems.value.find((x) => x.id === id)
+  return it?.location_path
+}
 function labelOf(i) { return intentLabel[i] || i || '操作' }
 function fmt(d) { return new Date(d).toLocaleTimeString('zh-CN', { hour12: false }) }
 function fmtFull(d) { return new Date(d).toLocaleString('zh-CN', { hour12: false }) }
@@ -405,57 +492,66 @@ const inConfirm = computed(() => phase.value === 'confirm-text' || phase.value =
 
     <!-- Row 1: console (2/3) + latest result (1/3) -->
     <div class="grid gap-4 lg:grid-cols-3">
-    <div class="rounded-2xl bg-gradient-to-br from-slate-900 via-slate-800 to-slate-700 text-white p-6 shadow-lg lg:col-span-2">
-      <div class="flex items-center justify-between">
-        <div class="space-y-1">
-          <div class="text-xs opacity-70">语音控制台</div>
+    <div class="rounded-2xl bg-gradient-to-br from-slate-900 via-slate-800 to-slate-700 text-white p-3 sm:p-4 shadow-lg lg:col-span-2">
+      <div class="flex items-center justify-between gap-2 flex-wrap">
+        <div class="space-y-0.5 min-w-0">
           <div class="flex items-center gap-2">
-            <span :class="['inline-block w-2.5 h-2.5 rounded-full', phaseColor]"></span>
-            <div class="text-xl font-semibold">{{ phaseLabel }}</div>
+            <span :class="['inline-block w-2 h-2 rounded-full', phaseColor]"></span>
+            <div class="text-base font-semibold">{{ phaseLabel }}</div>
           </div>
-          <div class="text-xs opacity-70 flex flex-wrap gap-1 mt-2">
+          <div class="text-xs opacity-60 flex flex-wrap gap-1">
             <span>唤醒词:</span>
-            <span v-for="w in wakeWordsRef" :key="w" class="px-2 py-0.5 bg-white/10 rounded-full">{{ w }}</span>
+            <span v-for="w in wakeWordsRef" :key="w" class="px-1.5 py-0.5 bg-white/10 rounded-full">{{ w }}</span>
             <span v-if="!wakeWordsRef.length" class="opacity-50">(未配置)</span>
           </div>
-          <div v-if="voice.wakeHeard.value" class="text-xs opacity-50 mt-1">监听中: {{ voice.wakeHeard.value }}</div>
         </div>
-        <!-- Smaller wake-listen toggle (top-right) -->
-        <button
-          :class="['px-3 py-2 rounded-lg text-sm transition flex items-center gap-2',
-                   wakeOn ? 'bg-blue-500 hover:bg-blue-400' : 'bg-white/10 hover:bg-white/20']"
-          :disabled="phase !== 'idle' && phase !== 'speaking'"
-          @click="toggleWake">
-          <span :class="['w-2 h-2 rounded-full', wakeOn ? 'bg-white animate-pulse' : 'bg-white/40']"></span>
-          {{ wakeOn ? '正在监听唤醒词' : '开启唤醒监听' }}
-        </button>
+        <div class="flex gap-1.5 flex-wrap justify-end">
+          <button
+            :class="['px-2.5 py-1.5 rounded-lg text-xs transition flex items-center gap-1.5',
+                     micMuted ? 'bg-rose-500 hover:bg-rose-400' : 'bg-white/10 hover:bg-white/20']"
+            @click="toggleMute"
+            :title="micMuted ? '点击恢复麦克风' : '闭麦防止误识别'">
+            {{ micMuted ? '🚫 闭麦中' : '🎙 在线' }}
+          </button>
+          <button
+            :class="['px-2.5 py-1.5 rounded-lg text-xs transition flex items-center gap-1.5',
+                     wakeOn ? 'bg-blue-500 hover:bg-blue-400' : 'bg-white/10 hover:bg-white/20',
+                     micMuted ? 'opacity-40 cursor-not-allowed' : '']"
+            :disabled="micMuted || (phase !== 'idle' && phase !== 'speaking')"
+            @click="toggleWake">
+            <span :class="['w-1.5 h-1.5 rounded-full', wakeOn ? 'bg-white animate-pulse' : 'bg-white/40']"></span>
+            {{ wakeOn ? '听唤醒词中' : '唤醒监听' }}
+          </button>
+        </div>
       </div>
 
-      <!-- Big push-to-talk button (primary action) -->
-      <div class="flex flex-col items-center gap-3 mt-6">
+      <!-- Compact push-to-talk; tap again to abort while busy. -->
+      <div class="flex items-center gap-3 mt-3">
         <button
-          :disabled="phase !== 'idle'"
-          :class="['relative w-44 h-44 rounded-full flex items-center justify-center text-6xl shadow-2xl transition',
-                   phase === 'idle'
-                     ? 'bg-emerald-500 hover:bg-emerald-400 ring-8 ring-emerald-300/30 active:scale-95'
-                     : 'bg-slate-600 cursor-not-allowed opacity-60']"
+          :disabled="micMuted && phase === 'idle'"
+          :class="['relative w-20 h-20 rounded-full flex items-center justify-center text-3xl shadow-lg transition shrink-0',
+                   micMuted
+                     ? 'bg-slate-700 cursor-not-allowed opacity-50'
+                     : (phase === 'idle'
+                       ? 'bg-emerald-500 hover:bg-emerald-400 ring-4 ring-emerald-300/30 active:scale-95'
+                       : 'bg-rose-500 hover:bg-rose-400 active:scale-95')]"
           @click="pushToTalk">
           <span v-if="phase === 'command'" class="absolute inset-0 rounded-full animate-ping bg-emerald-400 opacity-30"></span>
-          🎤
+          {{ phase === 'idle' ? '🎤' : (phase === 'speaking' ? '🔇' : '⏹') }}
         </button>
-        <div class="text-sm opacity-90 text-center">
-          <div class="font-medium">{{ phase === 'idle' ? '点击说话' : '请稍候' }}</div>
-          <div class="text-xs opacity-60 mt-0.5">单次说话 · 一句话指令</div>
-        </div>
-      </div>
-
-      <!-- Waveform -->
-      <div class="mt-5 bg-black/20 rounded-xl p-3">
-        <Waveform :levels="meter.levels.value" :active="meter.active.value" :height="48" />
-        <div class="flex items-center justify-between mt-1 text-xs opacity-70">
-          <span>{{ meter.active.value ? '🎙 音频采集中' : '点击麦克风启动' }}</span>
-          <span v-if="meter.error.value" class="text-amber-300">⚠ {{ meter.error.value }}</span>
-          <span v-else class="font-mono">RMS {{ (meter.rms.value * 100).toFixed(0) }}%</span>
+        <div class="flex-1 min-w-0">
+          <div class="text-sm font-medium">
+            {{ micMuted ? '已闭麦' : (phase === 'idle' ? '点击说话' : '点击中断') }}
+          </div>
+          <div v-if="voice.wakeHeard.value" class="text-xs opacity-60 truncate">监听: {{ voice.wakeHeard.value }}</div>
+          <div class="mt-1 bg-black/20 rounded-md px-2 py-1">
+            <Waveform :levels="meter.levels.value" :active="meter.active.value" :height="22" />
+            <div class="flex items-center justify-between mt-0.5 text-[10px] opacity-60">
+              <span>{{ meter.active.value ? '🎙' : '—' }}</span>
+              <span v-if="meter.error.value" class="text-amber-300 truncate">⚠ {{ meter.error.value }}</span>
+              <span v-else class="font-mono">{{ (meter.rms.value * 100).toFixed(0) }}%</span>
+            </div>
+          </div>
         </div>
       </div>
 
@@ -498,6 +594,26 @@ const inConfirm = computed(() => phase.value === 'confirm-text' || phase.value =
           </div>
           <div class="text-base text-slate-800 bg-slate-50 rounded-lg p-3">💬 {{ result.speech }}</div>
 
+          <!-- Needs-based recommendations: shows purpose alongside each item, with a
+               "看 3D" affordance to scroll the highlight into view. -->
+          <div v-if="result.recommendations?.length">
+            <div class="label mb-1">推荐用品</div>
+            <table class="w-full text-xs">
+              <thead class="text-slate-400">
+                <tr><th class="text-left py-1">物品</th><th class="text-left py-1">用途</th><th class="text-left py-1">位置</th></tr>
+              </thead>
+              <tbody>
+                <tr v-for="rec in result.recommendations" :key="rec.item_id"
+                    class="border-t border-slate-100 hover:bg-slate-50 cursor-pointer"
+                    @click="pickCandidate({ item_id: rec.item_id, item_name: candidateNameOf(rec.item_id) })">
+                  <td class="py-1 font-medium">{{ candidateNameOf(rec.item_id) }}</td>
+                  <td class="py-1 text-slate-600">{{ rec.purpose }}</td>
+                  <td class="py-1 text-slate-500 truncate">{{ candidateLocOf(rec.item_id) || '—' }}</td>
+                </tr>
+              </tbody>
+            </table>
+          </div>
+
           <div v-if="result.candidates?.length">
             <div class="label mb-1">候选物品</div>
             <ul class="space-y-1.5 max-h-48 overflow-auto">
@@ -517,7 +633,7 @@ const inConfirm = computed(() => phase.value === 'confirm-text' || phase.value =
 
     <!-- Row 2: 3D preview (2/3) + session history (1/3) -->
     <div class="grid gap-4 lg:grid-cols-3">
-      <div class="card p-4 space-y-2 lg:col-span-2">
+      <div ref="sceneSection" class="card p-4 space-y-2 lg:col-span-2 scroll-mt-20">
         <div class="flex items-center justify-between">
           <div class="font-semibold">家中位置预览</div>
           <button class="text-xs text-slate-400 hover:text-slate-700" @click="loadScene">↻ 刷新</button>

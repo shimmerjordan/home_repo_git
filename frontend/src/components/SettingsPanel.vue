@@ -72,6 +72,8 @@ async function save() {
       temperature: parseFloat(cfg.value.llm.temperature),
       timeout: parseInt(cfg.value.llm.timeout, 10),
       supports_tools: !!cfg.value.llm.supports_tools,
+      max_tokens: parseInt(cfg.value.llm.max_tokens, 10) || 512,
+      fast_mode: !!cfg.value.llm.fast_mode,
     }
     if (apiKeyInput.value) llm.api_key = apiKeyInput.value
     const voice = {
@@ -148,6 +150,21 @@ const wakeWordsText = computed({
       </div>
       <div class="text-xs text-slate-500">
         勾选后用 OpenAI 风格 tool_calls; 否则降级为 JSON 模式 (适配老 Ollama 等).
+      </div>
+      <div class="grid grid-cols-2 gap-2 border-t pt-3">
+        <div>
+          <label class="label">Max tokens (响应上限)</label>
+          <input v-model.number="cfg.llm.max_tokens" type="number" min="64" max="8192" class="input" />
+          <div class="text-xs text-slate-500 mt-1">越小越快, 中文 256~512 一般够用.</div>
+        </div>
+        <div class="flex items-end">
+          <label class="flex items-center gap-2 text-sm">
+            <input type="checkbox" v-model="cfg.llm.fast_mode" /> 极速模式 (精简上下文)
+          </label>
+        </div>
+      </div>
+      <div class="text-xs text-slate-500">
+        极速模式 = 缩短系统提示 + 减少给 AI 的候选物品数. 配合轻量模型(如 glm-4-flash / qwen2.5-7b)效果最好.
       </div>
       <div class="flex gap-2">
         <button class="btn btn-primary" :disabled="saving" @click="save">保存</button>
