@@ -162,8 +162,11 @@ function clearObjects() {
       v.roomLamp.material?.dispose?.()
     }
   }
+  // Item cubes are now CHILDREN of their container mesh (so they inherit transforms).
+  // Removing the container mesh already disposes them via the traverse above —
+  // here we only need to clear the lookup map and dispose materials defensively.
   for (const v of itemMeshes.value.values()) {
-    scene.remove(v.mesh)
+    v.mesh.parent?.remove(v.mesh)
     v.mesh.geometry?.dispose()
     v.mesh.material?.dispose?.()
   }
@@ -298,56 +301,55 @@ function rebuild() {
   for (const [locId, items] of itemsByLoc) {
     const info = locMeshes.value.get(locId)
     if (!info) continue
-    // Items without explicit pos go in a grid; items with pos use their pos directly.
+    // Rule: only render item cubes when the parent is an ACTUAL storage container
+    // (cabinet/shelf/drawer/box/fridge/desk/etc). Items placed directly in a room
+    // would otherwise clutter the floor with anonymous pink cubes — they're still
+    // searchable via voice + the highlight breadcrumb shows the chain.
+    const cat = catalogFor(info.locInfo.loc.kind)
+    if (!cat?.container || cat?.isRoom) continue
+
     const auto = items.filter((it) => it.pos_x == null && it.pos_z == null)
     const manual = items.filter((it) => !(it.pos_x == null && it.pos_z == null))
 
+    const w = info.geo.w, h = info.geo.h, d = info.geo.d
     const cols = Math.ceil(Math.sqrt(Math.max(auto.length, 1)))
-    const cellW = (info.geo.w - 0.1) / Math.max(cols, 1)
-    const cellD = (info.geo.d - 0.1) / Math.max(cols, 1)
-    const baseSize = Math.max(0.06, Math.min(cellW, cellD) * 0.55)
+    const cellW = (w - 0.10) / Math.max(cols, 1)
+    const cellD = (d - 0.10) / Math.max(cols, 1)
+    const baseSize = Math.max(0.05, Math.min(cellW, cellD) * 0.55)
 
-    function spawn(it, x, z, size) {
-      const cubeGeo = new THREE.BoxGeometry(size, size, size)
-      const cubeMat = new THREE.MeshStandardMaterial({
-        color: new THREE.Color('#fb7185'),
-        emissive: new THREE.Color('#000'), roughness: 0.6,
-      })
-      const cube = new THREE.Mesh(cubeGeo, cubeMat)
-      cube.position.set(x, info.world.y - info.geo.h / 2 + size / 2 + 0.02, z)
+    // CRITICAL: cubes are now CHILDREN of the container mesh, using LOCAL coords.
+    // Container's local origin is its centre; floor is at y = -h/2, walls at ±w/2 / ±d/2.
+    // This makes the cube inherit the container's position, rotation, level offset,
+    // nested parenting — everything. No "world coord + offset" math to drift.
+    function spawn(it, lx, lz, size) {
+      const cube = new THREE.Mesh(
+        new THREE.BoxGeometry(size, size, size),
+        new THREE.MeshStandardMaterial({
+          color: new THREE.Color('#fb7185'), roughness: 0.6,
+        }),
+      )
+      // Local Y: sit the cube on the container's floor with a 2 mm gap.
+      cube.position.set(lx, -h / 2 + size / 2 + 0.002, lz)
       cube.userData = { type: 'item', id: it.id, name: it.name, locationId: locId }
-      scene.add(cube)
-      itemMeshes.value.set(it.id, { mesh: cube, baseColor: cubeMat.color.clone() })
+      info.mesh.add(cube)
+      itemMeshes.value.set(it.id, { mesh: cube, baseColor: cube.material.color.clone() })
     }
 
-    // Pre-compute candidate grid cells. For polygon rooms, drop cells whose centre
-    // falls outside the actual room shape — otherwise items render as pink cubes
-    // in the L-shape "cut-out" floating in nowhere.
-    const poly = info.geo.polygon
-    const cells = []
-    for (let r = 0; r < cols; r++) {
-      for (let c = 0; c < cols; c++) {
-        const x = info.world.x - info.geo.w / 2 + 0.05 + c * cellW + cellW / 2
-        const z = info.world.z - info.geo.d / 2 + 0.05 + r * cellD + cellD / 2
-        if (poly) {
-          // Polygon points are stored in the room's LOCAL frame (relative to anchor).
-          const lx = x - info.world.x
-          const lz = z - info.world.z
-          if (!pointInPolygon(lx, lz, poly)) continue
-        }
-        cells.push({ x, z })
-      }
-    }
     auto.forEach((it, i) => {
-      const cell = cells[i % Math.max(cells.length, 1)] || { x: info.world.x, z: info.world.z }
-      spawn(it, cell.x, cell.z, baseSize)
+      const col = i % cols, row = Math.floor(i / cols)
+      // Local cell centre, inset 5 cm from the container wall.
+      const lx = -w / 2 + 0.05 + col * cellW + cellW / 2
+      const lz = -d / 2 + 0.05 + row * cellD + cellD / 2
+      spawn(it, lx, lz, baseSize)
     })
     manual.forEach((it) => {
-      const size = Math.max(0.05, Math.min(0.2, info.geo.w * 0.2))
-      spawn(it,
-        info.world.x + (+it.pos_x || 0),
-        info.world.z + (+it.pos_z || 0),
-        size)
+      const size = Math.max(0.05, Math.min(0.2, Math.min(w, d) * 0.25))
+      // pos_x / pos_z are RELATIVE to container centre. Clamp to container bounds
+      // so a typo doesn't fling the cube into the next room.
+      const margin = size / 2 + 0.02
+      const lx = Math.max(-w / 2 + margin, Math.min(w / 2 - margin, +it.pos_x || 0))
+      const lz = Math.max(-d / 2 + margin, Math.min(d / 2 - margin, +it.pos_z || 0))
+      spawn(it, lx, lz, size)
     })
   }
 
@@ -476,12 +478,25 @@ async function focusItem(itemId) {
 // Highlight one or more item meshes at once. Camera fits all of them; every
 // matching cube pulses; non-target locations and items are ghosted out.
 async function focusItems(itemIds) {
-  const ids = (itemIds || []).filter((id) => id && itemMeshes.value.has(id))
+  const ids = (itemIds || []).filter((id) => !!id)
   if (!ids.length) return
 
-  if (ids.length === 1) {
-    // Walk the single-target chain so we get a satisfying "drill-in" animation.
-    const id = ids[0]
+  // Items that have a rendered cube (parent kind is a non-room container).
+  const withCubes = ids.filter((id) => itemMeshes.value.has(id))
+
+  // FALLBACK: no cubes exist (e.g. the item is placed directly in a room and we
+  // intentionally skipped rendering it). Camera-zoom to the item's location and
+  // let the highlight breadcrumb overlay tell the user where it is.
+  if (!withCubes.length) {
+    const item = (props.items || []).find((i) => i.id === ids[0])
+    if (item?.location_id) await focusLocation(item.location_id)
+    occludeForMultiHighlight(ids)
+    return
+  }
+
+  if (withCubes.length === 1) {
+    // Walk the parent chain for a "drill-in" feel on the single-target case.
+    const id = withCubes[0]
     const item = (props.items || []).find((i) => i.id === id)
     if (item?.location_id) {
       const byId = new Map((props.locations || []).map((l) => [l.id, l]))
@@ -500,8 +515,13 @@ async function focusItems(itemIds) {
     }
   }
 
-  // Final: fit camera to the bounding box of all targets.
-  const positions = ids.map((id) => itemMeshes.value.get(id).mesh.position.clone())
+  // Cube WORLD positions: cubes are children of their container mesh now, so
+  // mesh.position is LOCAL. Use getWorldPosition() to fit the camera.
+  const positions = withCubes.map((id) => {
+    const m = itemMeshes.value.get(id).mesh
+    m.updateMatrixWorld(true)
+    return m.getWorldPosition(new THREE.Vector3())
+  })
   const box = new THREE.Box3().setFromPoints(positions)
   const center = new THREE.Vector3(); box.getCenter(center)
   const size = new THREE.Vector3(); box.getSize(size)
@@ -511,10 +531,8 @@ async function focusItems(itemIds) {
     { x: center.x + dist * 0.55, y: center.y + dist * 0.75, z: center.z + dist * 0.85 },
     { x: center.x, y: center.y, z: center.z }, 800)
 
-  occludeForMultiHighlight(ids)
-  for (const id of ids) {
-    pulseHighlight(itemMeshes.value.get(id).mesh)
-  }
+  occludeForMultiHighlight(withCubes)
+  for (const id of withCubes) pulseHighlight(itemMeshes.value.get(id).mesh)
 }
 
 async function focusLocation(locId) {
@@ -734,7 +752,7 @@ function onPointerMove(ev) {
   pointer.x = ((ev.clientX - rect.left) / rect.width) * 2 - 1
   pointer.y = -((ev.clientY - rect.top) / rect.height) * 2 + 1
   raycaster.setFromCamera(pointer, camera)
-  const hits = raycaster.intersectObjects(scene.children, false)
+  const hits = raycaster.intersectObjects(scene.children, true)
   const hit = hits.find((h) => h.object.userData?.type)
   if (hit) {
     const ud = hit.object.userData
@@ -754,7 +772,7 @@ function onPointerDown(ev) {
   pointer.x = ((ev.clientX - rect.left) / rect.width) * 2 - 1
   pointer.y = -((ev.clientY - rect.top) / rect.height) * 2 + 1
   raycaster.setFromCamera(pointer, camera)
-  const hits = raycaster.intersectObjects(scene.children, false)
+  const hits = raycaster.intersectObjects(scene.children, true)
   const hit = hits.find((h) => h.object.userData?.type)
   if (!hit) return
   const ud = hit.object.userData
