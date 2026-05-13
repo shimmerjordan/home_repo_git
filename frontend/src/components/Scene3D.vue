@@ -3,7 +3,8 @@ import { ref, computed, watch, onMounted, onBeforeUnmount, shallowRef } from 'vu
 import * as THREE from 'three'
 import { OrbitControls } from 'three/examples/jsm/controls/OrbitControls.js'
 import { TransformControls } from 'three/examples/jsm/controls/TransformControls.js'
-import { buildWorldMap, catalogFor, defaultChildY, levelY } from '../composables/sceneLayout'
+import { buildWorldMap, catalogFor, defaultChildY, levelY,
+         pointInPolygon, describeLocationChain } from '../composables/sceneLayout'
 
 const props = defineProps({
   locations: { type: Array, default: () => [] },
@@ -24,6 +25,27 @@ const emit = defineEmits(['select-location', 'select-item', 'transform-end', 'up
 
 // Resolved CSS height for the renderer container.
 const containerHeight = computed(() => typeof props.height === 'number' ? props.height + 'px' : String(props.height))
+
+// Breadcrumb of the currently highlighted item(s). Rendered as a floating
+// overlay so the user can see where the pulsing cube actually lives.
+const highlightInfo = computed(() => {
+  const ids = (props.highlightItemIds && props.highlightItemIds.length)
+    ? props.highlightItemIds
+    : (props.highlightItemId ? [props.highlightItemId] : [])
+  if (!ids.length) return null
+  const items = props.items || []
+  const out = []
+  for (const id of ids) {
+    const item = items.find((i) => i.id === id)
+    if (!item) continue
+    out.push({
+      id,
+      name: item.name,
+      path: describeLocationChain(item.location_id, props.locations || []),
+    })
+  }
+  return out.length ? out : null
+})
 
 const container = ref(null)
 const tooltip = ref({ visible: false, x: 0, y: 0, text: '' })
@@ -298,12 +320,27 @@ function rebuild() {
       itemMeshes.value.set(it.id, { mesh: cube, baseColor: cubeMat.color.clone() })
     }
 
+    // Pre-compute candidate grid cells. For polygon rooms, drop cells whose centre
+    // falls outside the actual room shape — otherwise items render as pink cubes
+    // in the L-shape "cut-out" floating in nowhere.
+    const poly = info.geo.polygon
+    const cells = []
+    for (let r = 0; r < cols; r++) {
+      for (let c = 0; c < cols; c++) {
+        const x = info.world.x - info.geo.w / 2 + 0.05 + c * cellW + cellW / 2
+        const z = info.world.z - info.geo.d / 2 + 0.05 + r * cellD + cellD / 2
+        if (poly) {
+          // Polygon points are stored in the room's LOCAL frame (relative to anchor).
+          const lx = x - info.world.x
+          const lz = z - info.world.z
+          if (!pointInPolygon(lx, lz, poly)) continue
+        }
+        cells.push({ x, z })
+      }
+    }
     auto.forEach((it, i) => {
-      const col = i % cols, row = Math.floor(i / cols)
-      spawn(it,
-        info.world.x - info.geo.w / 2 + 0.05 + col * cellW + cellW / 2,
-        info.world.z - info.geo.d / 2 + 0.05 + row * cellD + cellD / 2,
-        baseSize)
+      const cell = cells[i % Math.max(cells.length, 1)] || { x: info.world.x, z: info.world.z }
+      spawn(it, cell.x, cell.z, baseSize)
     })
     manual.forEach((it) => {
       const size = Math.max(0.05, Math.min(0.2, info.geo.w * 0.2))
@@ -772,6 +809,25 @@ defineExpose({ focusItem, focusItems, focusLocation, fitAll, setTransformMode })
   <div class="relative">
     <div ref="container" :style="{ height: containerHeight }"
          class="rounded-lg overflow-hidden border border-slate-200 bg-slate-900"></div>
+
+    <!-- Highlight breadcrumb. Sits at the TOP-LEFT of the viewport so it never
+         overlaps the pulsing cube (which is centred during the focus animation),
+         and stays mostly transparent so the scene shows through. -->
+    <div v-if="highlightInfo"
+         class="pointer-events-none absolute top-2 left-2 right-12 max-w-md
+                bg-slate-900/85 backdrop-blur-sm text-white text-xs rounded-lg
+                px-3 py-2 shadow-lg border border-white/10 space-y-1">
+      <div class="text-[10px] opacity-60 tracking-wide uppercase">
+        高亮中 ({{ highlightInfo.length }} 处)
+      </div>
+      <ul class="space-y-1">
+        <li v-for="h in highlightInfo" :key="h.id" class="leading-snug">
+          <div class="font-medium text-amber-200">📎 {{ h.name }}</div>
+          <div class="opacity-80 break-all">{{ h.path || '未指定位置' }}</div>
+        </li>
+      </ul>
+    </div>
+
     <div v-if="tooltip.visible"
          class="pointer-events-none absolute bg-slate-900/95 text-white text-xs rounded px-2 py-1 shadow-lg"
          :style="{ left: tooltip.x + 'px', top: tooltip.y + 'px' }">

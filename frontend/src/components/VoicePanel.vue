@@ -81,10 +81,20 @@ async function loadScene() {
 onMounted(() => { loadRecent(); loadScene() })
 watch(() => props.refreshKey, () => { loadRecent(); loadScene() })
 
+// When the user explicitly picks a candidate via "选这个", we must NOT let the
+// auto-multi-highlight logic re-light all same-name items — the watcher would
+// otherwise fight the explicit single highlight. Pickers set this flag once.
+let suppressNextAutoHighlight = false
+
 watch(() => result.value, (v) => {
-  // When the LLM returns candidates, highlight every one with the same name as the
-  // top candidate so multi-location items ("X 在多个地方") all light up at once.
   if (!v) return
+  if (suppressNextAutoHighlight) {
+    suppressNextAutoHighlight = false
+    if (v.executed) loadScene()
+    return
+  }
+  // Default: multi-highlight every candidate sharing the top candidate's name
+  // (this is the "X 在多个地方" scenario).
   const cands = v.candidates || []
   if (cands.length) {
     const top = cands[0]
@@ -305,8 +315,14 @@ async function pickCandidate(c) {
       location_id: result.value?.raw?.location_id || null,
       quantity: result.value?.raw?.quantity || 1,
     }
+    // The user explicitly picked ONE candidate — bypass the watcher's
+    // multi-highlight branch and only light up the chosen item.
+    suppressNextAutoHighlight = true
     const r = await api.voiceIntent(transcript.value, { confirmed: true, pending_action: pa })
     result.value = r
+    sceneHighlightIds.value = []
+    sceneHighlightItem.value = null
+    setTimeout(() => { sceneHighlightItem.value = c.item_id }, 50)
     if (r.speech) await voice.speak(r.speech)
     if (r.executed) emit('changed')
     loadRecent()

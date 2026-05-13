@@ -48,6 +48,37 @@ export function defaultsFor(kind) {
   return KIND_DEFAULTS[kind] || KIND_DEFAULTS.other
 }
 
+// Build a human-readable breadcrumb of where a location lives in the hierarchy,
+// surfacing its level/slot inside its parent so the user can find it physically.
+// Example output: "客厅 / 客厅收纳柜 / 第2层第3个 / 收纳箱"
+export function describeLocationChain(targetLocId, locations) {
+  if (!targetLocId) return ''
+  const byId = new Map(locations.map((l) => [l.id, l]))
+  const chain = []
+  let cur = targetLocId
+  const seen = new Set()
+  while (cur && !seen.has(cur)) {
+    seen.add(cur)
+    const loc = byId.get(cur)
+    if (!loc) break
+    chain.unshift(loc)
+    cur = loc.parent_id
+  }
+  const parts = []
+  for (const loc of chain) {
+    const g = loc.geometry || {}
+    const lvl = +g.level || 0
+    const slot = +g.slot || 0
+    // Insert a "level/slot" segment BEFORE the loc name, so the breadcrumb reads
+    // "parent → 第N层第M个 → loc"
+    if (lvl && slot) parts.push(`第${lvl}层第${slot}个`)
+    else if (lvl) parts.push(`第${lvl}层`)
+    else if (slot) parts.push(`第${slot}个`)
+    parts.push(loc.name)
+  }
+  return parts.join(' / ')
+}
+
 // Best-effort detection of mobile / touch / low-power devices so we can default
 // to a "low quality" 3D mode (no shadows, no per-room lights). Users can flip the
 // switch in the 3D viewer's toolbar if they want pretty visuals.
