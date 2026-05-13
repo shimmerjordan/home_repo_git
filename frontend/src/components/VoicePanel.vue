@@ -21,6 +21,27 @@ watch(() => lowQuality.value, (v) => {
   try { localStorage.setItem(LQ_KEY, v ? '1' : '0') } catch {}
 })
 
+// Shared with BuildingPanel via localStorage: list of rooms whose item cubes are
+// shown by default. Read once on mount; users toggle from BuildingPanel.
+const SHOWN_ITEMS_KEY = 'storage.scene3d.shownItemRooms'
+function loadShownRooms() {
+  try {
+    const raw = localStorage.getItem(SHOWN_ITEMS_KEY)
+    if (raw) {
+      const arr = JSON.parse(raw)
+      if (Array.isArray(arr)) return arr.map(Number).filter(Number.isFinite)
+    }
+  } catch {}
+  return []
+}
+const shownItemRoomIds = ref(loadShownRooms())
+// Pick up changes other tabs make to the toggle (BuildingPanel writes here).
+if (typeof window !== 'undefined') {
+  window.addEventListener('storage', (ev) => {
+    if (ev.key === SHOWN_ITEMS_KEY) shownItemRoomIds.value = loadShownRooms()
+  })
+}
+
 const props = defineProps({ settings: Object, refreshKey: Number })
 const emit = defineEmits(['changed'])
 
@@ -509,6 +530,7 @@ const inConfirm = computed(() => phase.value === 'confirm-text' || phase.value =
                  :highlight-item-ids="sceneHighlightIds"
                  :highlight-location-id="sceneHighlightLoc"
                  :low-quality="lowQuality"
+                 :show-items-in-room-ids="shownItemRoomIds"
                  :height="'clamp(280px, 42vh, 520px)'"
                  @update:low-quality="lowQuality = $event" />
         <div class="text-xs text-slate-400">语音找到物品时这里会自动推进镜头并高亮目标(其余区域半透淡出)。</div>

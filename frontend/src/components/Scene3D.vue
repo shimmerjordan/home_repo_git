@@ -20,6 +20,11 @@ const props = defineProps({
   // When true, skip shadows and per-room point lights so iPad / touch devices stay
   // smooth. Auto-detected upstream; user can flip the switch via the toolbar.
   lowQuality: { type: Boolean, default: false },
+  // List of room IDs whose item cubes should be rendered as visible markers. Items
+  // in other rooms (or directly in rooms without a container) stay hidden. A
+  // currently-highlighted item is ALWAYS visible regardless of this list, so a
+  // voice search still gets a pulsing target.
+  showItemsInRoomIds: { type: Array, default: () => [] },
 })
 const emit = defineEmits(['select-location', 'select-item', 'transform-end', 'update:low-quality'])
 
@@ -308,50 +313,33 @@ function rebuild() {
     const cat = catalogFor(info.locInfo.loc.kind)
     if (!cat?.container || cat?.isRoom) continue
 
-    const auto = items.filter((it) => it.pos_x == null && it.pos_z == null)
-    const manual = items.filter((it) => !(it.pos_x == null && it.pos_z == null))
-
     const w = info.geo.w, h = info.geo.h, d = info.geo.d
-    const cols = Math.ceil(Math.sqrt(Math.max(auto.length, 1)))
-    const cellW = (w - 0.10) / Math.max(cols, 1)
-    const cellD = (d - 0.10) / Math.max(cols, 1)
-    const baseSize = Math.max(0.05, Math.min(cellW, cellD) * 0.55)
+    // Cube size = 25% of the container's smallest horizontal dim, capped at 20 cm.
+    // We don't try to grid-pack any more — every cube lives at the container's
+    // physical centre. Multiple items in the same container will visually overlap
+    // into a single glowing marker (intentional: the breadcrumb tells you how many).
+    const baseSize = Math.max(0.05, Math.min(0.2, Math.min(w, d) * 0.25))
 
-    // CRITICAL: cubes are now CHILDREN of the container mesh, using LOCAL coords.
-    // Container's local origin is its centre; floor is at y = -h/2, walls at ±w/2 / ±d/2.
-    // This makes the cube inherit the container's position, rotation, level offset,
-    // nested parenting — everything. No "world coord + offset" math to drift.
-    function spawn(it, lx, lz, size) {
+    // Cubes are CHILDREN of the container mesh, positioned at LOCAL (0, 0, 0) —
+    // i.e. the container's true physical centre. They inherit its world transform
+    // (rotation, level offset, nested parenting) automatically.
+    function spawn(it, size) {
       const cube = new THREE.Mesh(
         new THREE.BoxGeometry(size, size, size),
         new THREE.MeshStandardMaterial({
-          color: new THREE.Color('#fb7185'), roughness: 0.6,
+          color: new THREE.Color('#fb7185'), roughness: 0.6, transparent: true, opacity: 0.95,
         }),
       )
-      // Local Y: sit the cube on the container's floor with a 2 mm gap.
-      cube.position.set(lx, -h / 2 + size / 2 + 0.002, lz)
+      cube.position.set(0, 0, 0)              // container centre, exact
       cube.userData = { type: 'item', id: it.id, name: it.name, locationId: locId }
+      cube.visible = false                    // default hidden; updateItemVisibility flips it
       info.mesh.add(cube)
       itemMeshes.value.set(it.id, { mesh: cube, baseColor: cube.material.color.clone() })
     }
-
-    auto.forEach((it, i) => {
-      const col = i % cols, row = Math.floor(i / cols)
-      // Local cell centre, inset 5 cm from the container wall.
-      const lx = -w / 2 + 0.05 + col * cellW + cellW / 2
-      const lz = -d / 2 + 0.05 + row * cellD + cellD / 2
-      spawn(it, lx, lz, baseSize)
-    })
-    manual.forEach((it) => {
-      const size = Math.max(0.05, Math.min(0.2, Math.min(w, d) * 0.25))
-      // pos_x / pos_z are RELATIVE to container centre. Clamp to container bounds
-      // so a typo doesn't fling the cube into the next room.
-      const margin = size / 2 + 0.02
-      const lx = Math.max(-w / 2 + margin, Math.min(w / 2 - margin, +it.pos_x || 0))
-      const lz = Math.max(-d / 2 + margin, Math.min(d / 2 - margin, +it.pos_z || 0))
-      spawn(it, lx, lz, size)
-    })
+    items.forEach((it) => spawn(it, baseSize))
   }
+
+  updateItemVisibility()
 
   fitAll(false)
   applySelection()
@@ -615,6 +603,24 @@ function updateRoomLights() {
   }
 }
 
+// Show / hide item cubes based on the parent's room being in
+// `props.showItemsInRoomIds`. A highlighted item is always visible regardless.
+function updateItemVisibility() {
+  const shownRooms = new Set(props.showItemsInRoomIds || [])
+  const highlighted = new Set([
+    ...((props.highlightItemIds && props.highlightItemIds.length) ? props.highlightItemIds : []),
+    ...(props.highlightItemId ? [props.highlightItemId] : []),
+  ])
+  const itemsById = new Map((props.items || []).map((it) => [it.id, it]))
+  for (const [iid, slot] of itemMeshes.value) {
+    if (highlighted.has(iid)) { slot.mesh.visible = true; continue }
+    const it = itemsById.get(iid)
+    if (!it) { slot.mesh.visible = false; continue }
+    const room = ancestorRoomOf(it.location_id)
+    slot.mesh.visible = room != null && shownRooms.has(room)
+  }
+}
+
 function applySelection() {
   for (const [id, v] of locMeshes.value) {
     const isSel = id === props.selectedLocationId
@@ -812,13 +818,17 @@ watch(() => props.lowQuality, () => {
 })
 
 watch(() => [props.locations, props.items], rebuild, { deep: true })
-watch(() => props.highlightItemId, (v) => { if (v) focusItems([v]); updateRoomLights() })
+watch(() => props.highlightItemId, (v) => {
+  if (v) focusItems([v])
+  updateRoomLights(); updateItemVisibility()
+})
 watch(() => props.highlightItemIds, (v) => {
   if (Array.isArray(v) && v.length) focusItems(v)
-  updateRoomLights()
+  updateRoomLights(); updateItemVisibility()
 }, { deep: true })
 watch(() => props.highlightLocationId, (v) => { if (v) focusLocation(v); updateRoomLights() })
 watch(() => props.selectedLocationId, applySelection)
+watch(() => props.showItemsInRoomIds, updateItemVisibility, { deep: true })
 
 defineExpose({ focusItem, focusItems, focusLocation, fitAll, setTransformMode })
 </script>

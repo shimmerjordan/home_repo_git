@@ -43,6 +43,32 @@ watch(lowQuality, (v) => {
   try { localStorage.setItem(LQ_KEY, v ? '1' : '0') } catch {}
 })
 
+// Per-room "show item markers" toggle. Items are hidden by default to keep the 3D
+// view clean; flip a room ON to see the pink cubes for items in any container
+// inside that room. Persisted as a JSON array of room IDs.
+const SHOWN_ITEMS_KEY = 'storage.scene3d.shownItemRooms'
+function loadShownRooms() {
+  try {
+    const raw = localStorage.getItem(SHOWN_ITEMS_KEY)
+    if (raw) {
+      const arr = JSON.parse(raw)
+      if (Array.isArray(arr)) return arr.map(Number).filter(Number.isFinite)
+    }
+  } catch {}
+  return []
+}
+const shownItemRoomIds = ref(loadShownRooms())
+watch(shownItemRoomIds, (v) => {
+  try { localStorage.setItem(SHOWN_ITEMS_KEY, JSON.stringify(v)) } catch {}
+}, { deep: true })
+
+function toggleShownRoom(roomId, on) {
+  if (!roomId) return
+  const cur = new Set(shownItemRoomIds.value)
+  if (on) cur.add(roomId); else cur.delete(roomId)
+  shownItemRoomIds.value = [...cur]
+}
+
 if (typeof window !== 'undefined') {
   window.addEventListener('resize', () => {
     isWide.value = window.innerWidth >= 1280
@@ -298,6 +324,7 @@ function selectFromTree(id) {
                  :selected-location-id="selectedId"
                  :selectable="true" :editable="true"
                  :low-quality="lowQuality"
+                 :show-items-in-room-ids="shownItemRoomIds"
                  :height="viewMode === '3d' ? 'clamp(360px, 62vh, 720px)' : 'clamp(320px, 56vh, 640px)'"
                  @select-location="selectedId = $event"
                  @select-item="(id) => { highlightItemId = null; setTimeout(() => highlightItemId = id, 30) }"
@@ -350,6 +377,21 @@ function selectFromTree(id) {
                            :parent-loc="parentLoc"
                            :all-locations="locations"
                            :live-width="form.w" />
+        </div>
+        <!-- Per-room "show item cubes" toggle. Only relevant for room nodes —
+             items in other location kinds always follow whatever the containing
+             room's setting is. Stored as a list of room IDs in localStorage. -->
+        <div v-if="selected.kind === 'room'" class="mt-3 p-2 bg-slate-50 rounded-md border border-slate-200">
+          <label class="flex items-center gap-2 text-sm cursor-pointer">
+            <input type="checkbox"
+                   :checked="shownItemRoomIds.includes(selected.id)"
+                   @change="toggleShownRoom(selected.id, $event.target.checked)" />
+            <span>在 3D 显示<b>本房间内物品</b>方块标记</span>
+          </label>
+          <div class="text-xs text-slate-500 mt-1">
+            默认关闭。开启后,房间内所有收纳容器(柜子/抽屉/箱子...)的物品会在容器的物理中心点显示一个粉色方块,
+            方便看哪些容器里有东西。被搜索高亮的物品始终可见,与本开关无关。
+          </div>
         </div>
         <div class="mt-3 flex gap-2 items-center">
           <button class="btn btn-primary" @click="applyProps">保存</button>
