@@ -29,6 +29,26 @@ const byId = computed(() => {
   return m
 })
 
+// (z, x) — z is the level (层, 1 = bottom shelf, increases upward), x is the
+// 1-based slot index inside that level. Stored on geometry.level / geometry.slot.
+// Returns null if neither is set (typical for free-positioned furniture).
+function positionLabel(loc) {
+  const g = effectiveGeometry(loc)
+  const z = +g.level || 0
+  const x = +g.slot || 0
+  if (!z && !x) return null
+  if (z && x) return `(${z}, ${x})`
+  if (z) return `第${z}层`
+  return `第${x}个`
+}
+
+function parentName(loc) {
+  if (!loc?.parent_id) return null
+  const p = byId.value.get(loc.parent_id)
+  if (!p) return null
+  return p.name
+}
+
 const childrenOf = computed(() => {
   const m = new Map()
   for (const l of locations.value) {
@@ -262,6 +282,12 @@ function up() {
             <div class="text-sm text-center font-medium truncate mt-1 px-1">{{ c.name }}</div>
             <div class="text-xs text-center text-slate-400 mt-0.5">
               {{ descendantCount(c.id) }} 件 · {{ (childrenOf.get(c.id) || []).length }} 子
+            </div>
+            <!-- Parent + (z, x) position. Helps disambiguate when the same name
+                 appears under multiple parents (e.g. several "第2层"). -->
+            <div v-if="parentName(c) || positionLabel(c)" class="text-[11px] text-center text-slate-500 mt-1 truncate px-1">
+              <span v-if="parentName(c)" class="text-slate-400">📁 {{ parentName(c) }}</span>
+              <span v-if="positionLabel(c)" class="ml-1 font-mono text-slate-600">{{ positionLabel(c) }}</span>
             </div>
           </button>
         </div>
