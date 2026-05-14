@@ -121,6 +121,35 @@ function svgPoint(ev) {
   return { x: p.x, z: p.y }
 }
 
+// Nearest-shape fallback for "almost a hit" clicks: returns the closest non-room
+// shape within ~10 client pixels of the cursor. Lets users grab small furniture
+// (e.g. a stool drawn at 0.3 m) that has a near-invisible hit target at wide zoom.
+function findNearestShape(p) {
+  // Translate "10 px" into viewBox units using the current screen CTM.
+  let pxToVb = 0.05
+  if (svgRef.value) {
+    const m = svgRef.value.getScreenCTM()
+    if (m && m.a) pxToVb = 1 / m.a
+  }
+  const tol = pxToVb * 14
+  let best = null, bestDist = Infinity
+  for (const r of renderables.value) {
+    if (r.isRoom) continue  // never auto-grab rooms — too easy to drag a whole room
+    let lx = p.x - r.x, lz = p.z - r.z
+    if (r.rot) {
+      const a = -r.rot * Math.PI / 180
+      const cs = Math.cos(a), sn = Math.sin(a)
+      ;[lx, lz] = [lx * cs - lz * sn, lx * sn + lz * cs]
+    }
+    // Distance to the rect's edge (0 if inside).
+    const dx = Math.max(0, Math.abs(lx) - r.w / 2)
+    const dz = Math.max(0, Math.abs(lz) - r.d / 2)
+    const dist = Math.hypot(dx, dz)
+    if (dist < tol && dist < bestDist) { best = r; bestDist = dist }
+  }
+  return best
+}
+
 // Hit-test all shapes at a point. Returns the topmost (smallest area) match.
 // `kindFilter` can be 'room', 'container', 'any'. Polygon rooms use point-in-polygon.
 function findShapeAt(x, z, kindFilter = 'any') {
@@ -564,9 +593,16 @@ function onPointerDown(ev) {
     return
   }
 
-  if (role === 'shape' && locId && tool.value === 'select') {
+  // Clicking on an existing shape always starts a move-drag, regardless of which
+  // tool is active. Previously this required tool='select' first, so on desktop the
+  // user had to manually switch tools before they could drag furniture — a footgun.
+  // EXCEPTION: clicking a ROOM body while a furniture-placing tool is active falls
+  // through so the new piece can be placed inside the room.
+  if (role === 'shape' && locId) {
     const r = renderables.value.find((x) => x.id === locId)
-    if (r) {
+    const isFurniturePlacement = r?.isRoom && tool.value !== 'select' && catalogFor(tool.value) && !catalogFor(tool.value)?.isRoom
+    if (r && !isFurniturePlacement) {
+      if (tool.value !== 'select') tool.value = 'select'
       emit('select', locId)
       drag.value = {
         type: 'move', locId,
@@ -574,8 +610,27 @@ function onPointerDown(ev) {
         x: r.x, z: r.z,
       }
       svgRef.value.setPointerCapture?.(ev.pointerId)
+      return
     }
-    return
+  }
+
+  // Hit-radius fudge: tiny furniture (e.g. 0.3×0.3 m at a wide viewBox) is hard to
+  // click precisely on desktop. If we missed everything but the cursor is within a
+  // small client-pixel radius of a shape's bounding box, treat it as a hit so the
+  // user can grab small pieces without zooming in first.
+  if (tool.value === 'select' && !role) {
+    const nearest = findNearestShape(p)
+    if (nearest) {
+      tool.value = 'select'
+      emit('select', nearest.id)
+      drag.value = {
+        type: 'move', locId: nearest.id,
+        offsetX: nearest.x - p.x, offsetZ: nearest.z - p.z,
+        x: nearest.x, z: nearest.z,
+      }
+      svgRef.value.setPointerCapture?.(ev.pointerId)
+      return
+    }
   }
 
   // Background interaction.
@@ -855,8 +910,8 @@ const ghost = computed(() => {
         <template v-else-if="tool==='room-poly'">
           🔷 点击逐个加顶点 ({{ polyPoints.length }} 点) · 点回起点 / 按 Enter 闭合 · Esc 取消 · Backspace 撤一点
         </template>
-        <template v-else-if="tool!=='select'">🎯 点击放 <b>{{ catalogFor(tool)?.label }}</b></template>
-        <template v-else>↖ 点物体拖移 / 空白拖动平移 / 滚轮缩放</template>
+        <template v-else-if="tool!=='select'">🎯 在房间空白处点击放 <b>{{ catalogFor(tool)?.label }}</b>(点已有物体则直接拖动)</template>
+        <template v-else>↖ 点物体拖移 / 空白拖动平移 / 滚轮缩放(小物体可点附近)</template>
       </span>
       <span class="font-mono flex-shrink-0">{{ mouse.x.toFixed(1) }}, {{ mouse.z.toFixed(1) }} m</span>
     </div>

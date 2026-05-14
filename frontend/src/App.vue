@@ -24,27 +24,52 @@ function bumpRefresh() { refreshKey.value += 1 }
 // Fullscreen toggle — modern API + iOS webkit fallback. iPad Safari < 16.4 has no
 // real fullscreen, so on those devices we toggle a CSS class to hide the page chrome.
 const isFullscreen = ref(false)
+// Two-tap exit guard: once in fullscreen, the first tap on the toggle arms a
+// 2-second window during which a second tap actually exits. Single mis-taps
+// (very common on iPad where the button sits near the page edge) get absorbed.
+const exitArmed = ref(false)
+let exitArmTimer = null
 function _fsElement() {
   return document.fullscreenElement || document.webkitFullscreenElement || null
 }
-function syncFs() { isFullscreen.value = !!_fsElement() || document.documentElement.classList.contains('faux-fullscreen') }
-async function toggleFullscreen() {
+function syncFs() {
+  isFullscreen.value = !!_fsElement() || document.documentElement.classList.contains('faux-fullscreen')
+  if (!isFullscreen.value) {
+    exitArmed.value = false
+    if (exitArmTimer) { clearTimeout(exitArmTimer); exitArmTimer = null }
+  }
+}
+async function _doExit() {
   const el = document.documentElement
-  const inFs = !!_fsElement()
   try {
-    if (inFs) {
-      const ex = document.exitFullscreen || document.webkitExitFullscreen
-      if (ex) await ex.call(document)
-    } else {
-      const rq = el.requestFullscreen || el.webkitRequestFullscreen
-      if (rq) { await rq.call(el); return syncFs() }
-      // Fallback for iPad Safari without fullscreen API.
-      el.classList.toggle('faux-fullscreen')
-    }
+    const ex = document.exitFullscreen || document.webkitExitFullscreen
+    if (ex && _fsElement()) await ex.call(document)
+  } catch {}
+  el.classList.remove('faux-fullscreen')
+  syncFs()
+}
+async function _doEnter() {
+  const el = document.documentElement
+  try {
+    const rq = el.requestFullscreen || el.webkitRequestFullscreen
+    if (rq) { await rq.call(el); return syncFs() }
+    el.classList.add('faux-fullscreen')
   } catch {
-    el.classList.toggle('faux-fullscreen')
+    el.classList.add('faux-fullscreen')
   }
   syncFs()
+}
+async function toggleFullscreen() {
+  if (!isFullscreen.value) { await _doEnter(); return }
+  // In fullscreen: require two-tap to exit.
+  if (!exitArmed.value) {
+    exitArmed.value = true
+    if (exitArmTimer) clearTimeout(exitArmTimer)
+    exitArmTimer = setTimeout(() => { exitArmed.value = false; exitArmTimer = null }, 2000)
+    return
+  }
+  if (exitArmTimer) { clearTimeout(exitArmTimer); exitArmTimer = null }
+  await _doExit()
 }
 onMounted(() => {
   document.addEventListener('fullscreenchange', syncFs)
@@ -74,9 +99,10 @@ const tabs = [
         <div class="font-semibold flex items-center gap-2 shrink-0">
           🏠 语音仓储管家
           <button @click="toggleFullscreen"
-            class="ml-1 px-2 py-1 rounded text-xs bg-white/10 hover:bg-white/20"
-            :title="isFullscreen ? '退出全屏' : '全屏显示'">
-            {{ isFullscreen ? '⤡' : '⤢' }}
+            :class="['ml-1 px-2 py-1 rounded text-xs',
+                     exitArmed ? 'bg-amber-500 text-slate-900' : 'bg-white/10 hover:bg-white/20']"
+            :title="isFullscreen ? (exitArmed ? '再点一次退出全屏' : '退出全屏需要点两下') : '全屏显示'">
+            {{ isFullscreen ? (exitArmed ? '再点退出' : '⤡') : '⤢' }}
           </button>
         </div>
         <!-- Horizontal scroll on iPad portrait so tabs always fit; labels collapse to icons on narrow widths. -->

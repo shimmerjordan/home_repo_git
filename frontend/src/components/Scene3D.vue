@@ -5,6 +5,7 @@ import { OrbitControls } from 'three/examples/jsm/controls/OrbitControls.js'
 import { TransformControls } from 'three/examples/jsm/controls/TransformControls.js'
 import { buildWorldMap, catalogFor, defaultChildY, levelY,
          pointInPolygon, describeLocationChain } from '../composables/sceneLayout'
+import { buildPrettyFurniture, hasPrettyMesh } from '../composables/furnitureMesh'
 
 const props = defineProps({
   locations: { type: Array, default: () => [] },
@@ -206,10 +207,15 @@ function rebuild() {
     } else {
       bodyGeo = new THREE.BoxGeometry(geo.w, geo.h, geo.d)
     }
+    // For "pretty" solid furniture (bed/sofa/chair/tv/toilet/plant/...) we keep
+    // an INVISIBLE box as the root (so hit-testing, transform-controls, occlusion
+    // fading and item-cube parenting still work uniformly) and attach a detailed
+    // group of sub-meshes on top.
+    const prettyKind = !isRoom && hasPrettyMesh(info.loc.kind)
     const mat = new THREE.MeshStandardMaterial({
       color: new THREE.Color(geo.color),
       transparent: true,
-      opacity: isRoom ? 0.06 : 0.18,
+      opacity: prettyKind ? 0 : (isRoom ? 0.06 : 0.18),
       depthWrite: false,
       roughness: 0.7,
       metalness: 0.05,
@@ -227,7 +233,28 @@ function rebuild() {
       new THREE.EdgesGeometry(bodyGeo),
       new THREE.LineBasicMaterial({ color: new THREE.Color(geo.color) }),
     )
+    // Hide edge outlines for pretty furniture — the detailed sub-meshes carry their
+    // own visual structure and the box outline looks like a stray frame.
+    if (prettyKind) edges.visible = false
     mesh.add(edges)
+
+    if (prettyKind) {
+      const pretty = buildPrettyFurniture(info.loc.kind, geo)
+      if (pretty) {
+        // Add each top-level sub-mesh directly so the existing occlusion code
+        // (which iterates mesh.children with material) can fade them in/out.
+        for (const child of [...pretty.children]) {
+          pretty.remove(child)
+          mesh.add(child)
+        }
+        // For deeper children (groups within groups) ensure shadows are set up.
+        if (!props.lowQuality) {
+          mesh.traverse((c) => {
+            if (c.isMesh && c !== mesh) { c.castShadow = true; c.receiveShadow = true }
+          })
+        }
+      }
+    }
 
     // Multi-level shelf dividers as 2 cm thick opaque slabs (look like real shelves).
     if (geo.levels >= 2) {
@@ -411,6 +438,37 @@ function occludeForMultiHighlight(targetItemIds) {
   }
 
   const restoreFns = []
+  // On-path containers: light them up + reveal all their item cubes so the user
+  // sees what else lives next to the target during the zoom-in.
+  // The IMMEDIATE parent of a target item gets the strongest glow.
+  const immediateParents = new Set()
+  for (const tid of targetSet) {
+    const t = (props.items || []).find((i) => i.id === tid)
+    if (t?.location_id) immediateParents.add(t.location_id)
+  }
+  for (const id of onPath) {
+    const v = locMeshes.value.get(id)
+    if (!v) continue
+    const m = v.mesh
+    if (m.material && m.material.emissive) {
+      const eSnap = m.material.emissive.getHex()
+      const iSnap = m.material.emissiveIntensity ?? 1
+      const strong = immediateParents.has(id)
+      m.material.emissive.setHex(strong ? 0xffd166 : 0x88b4ff)
+      m.material.emissiveIntensity = strong ? 0.55 : 0.25
+      restoreFns.push(() => {
+        m.material.emissive.setHex(eSnap)
+        m.material.emissiveIntensity = iSnap
+      })
+    }
+    // Reveal sibling item cubes inside this container temporarily.
+    m.children.forEach((c) => {
+      if (c.userData?.type === 'item' && !c.visible) {
+        c.visible = true
+        restoreFns.push(() => { c.visible = false })
+      }
+    })
+  }
   for (const [id, v] of locMeshes.value) {
     if (onPath.has(id)) continue
     const m = v.mesh

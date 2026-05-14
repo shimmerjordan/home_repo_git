@@ -152,6 +152,7 @@ class VoiceConfigPatch(BaseModel):
     wake_words: Optional[list[str]] = None
     confidence_threshold: Optional[float] = None
     confirm_before_llm: Optional[bool] = None
+    tts_enabled: Optional[bool] = None
     tts_voice: Optional[str] = None
     tts_lang: Optional[str] = None
     tts_rate: Optional[float] = None

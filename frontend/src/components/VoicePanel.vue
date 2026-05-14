@@ -61,6 +61,7 @@ watch(() => props.settings?.voice, (v) => {
     lang: v.tts_lang || 'zh-CN',
     rate: v.tts_rate ?? 1.05,
     pitch: v.tts_pitch ?? 1.0,
+    enabled: v.tts_enabled !== false,
   })
 }, { immediate: true, deep: true })
 
@@ -168,6 +169,7 @@ function stopAll() {
   voice.stopWakeListening()
   voice.cancelSpeak()
   meter.stop()
+  clearAutoYes()
   if (pendingAnswer.value) { pendingAnswer.value(false); pendingAnswer.value = null }
 }
 
@@ -365,35 +367,71 @@ async function runIntent() {
 
 // Generic verbal-or-button confirm.
 // Returns: 'yes' | 'no' | 'wake' (user said wake word again -> abandon and start fresh)
+// Auto-yes: in the pre-LLM "your sentence sounds right?" confirm, falling silent for
+// 30s defaults to YES — this is a confirmation of what we just transcribed, so the
+// safe default is to proceed. The low-confidence "execute action?" confirm does NOT
+// auto-yes (mutating data on silence would be dangerous).
 async function askConfirm({ prompt, detail }) {
-  phase.value = (phase.value === 'processing') ? 'confirm-action' : 'confirm-text'
+  const isTextConfirm = phase.value !== 'processing'
+  phase.value = isTextConfirm ? 'confirm-text' : 'confirm-action'
   confirmPrompt.value = prompt
   confirmDetail.value = detail || ''
   heardAnswer.value = ''
+  autoYesArmedAt.value = isTextConfirm ? Date.now() : 0
   await voice.speak(prompt)
 
   return new Promise((resolve) => {
     pendingAnswer.value = resolve
     listenLoop(resolve)
+    if (isTextConfirm) armAutoYes(resolve)
   })
+}
+
+const AUTO_YES_MS = 30000
+const autoYesArmedAt = ref(0)         // 0 = disabled; epoch ms = countdown start
+const autoYesCountdown = ref(30)      // displayed in the confirm card
+let autoYesTimer = null
+let autoYesTick = null
+function armAutoYes(myResolver) {
+  if (autoYesTimer) clearTimeout(autoYesTimer)
+  if (autoYesTick) clearInterval(autoYesTick)
+  autoYesCountdown.value = Math.ceil(AUTO_YES_MS / 1000)
+  autoYesTick = setInterval(() => {
+    const elapsed = Date.now() - autoYesArmedAt.value
+    autoYesCountdown.value = Math.max(0, Math.ceil((AUTO_YES_MS - elapsed) / 1000))
+  }, 500)
+  autoYesTimer = setTimeout(() => {
+    if (autoYesTimer) { clearTimeout(autoYesTimer); autoYesTimer = null }
+    if (autoYesTick) { clearInterval(autoYesTick); autoYesTick = null }
+    autoYesArmedAt.value = 0
+    if (pendingAnswer.value === myResolver) {
+      pendingAnswer.value = null
+      myResolver('yes')
+    }
+  }, AUTO_YES_MS)
+}
+function clearAutoYes() {
+  if (autoYesTimer) { clearTimeout(autoYesTimer); autoYesTimer = null }
+  if (autoYesTick) { clearInterval(autoYesTick); autoYesTick = null }
+  autoYesArmedAt.value = 0
 }
 
 async function listenLoop(myResolver) {
   // Loop listening for yes / no / wake until a definitive answer or button click.
   while (pendingAnswer.value === myResolver) {
-    const { result: r, text } = await voice.listenAnswer({ timeout: 6000 })
+    const { result: r, text } = await voice.listenAnswer({ timeout: 3500 })
     if (pendingAnswer.value !== myResolver) return // already resolved by button
     heardAnswer.value = text
-    if (r === 'yes')  { pendingAnswer.value = null; myResolver('yes');  return }
-    if (r === 'no')   { pendingAnswer.value = null; myResolver('no');   return }
-    if (r === 'wake') { pendingAnswer.value = null; myResolver('wake'); return }
+    if (r === 'yes')  { clearAutoYes(); pendingAnswer.value = null; myResolver('yes');  return }
+    if (r === 'no')   { clearAutoYes(); pendingAnswer.value = null; myResolver('no');   return }
+    if (r === 'wake') { clearAutoYes(); pendingAnswer.value = null; myResolver('wake'); return }
     if (text) await voice.speak('没听清,请说确定、取消,或再叫我一次')
   }
 }
 
-function answerYes()  { if (pendingAnswer.value) { const r = pendingAnswer.value; pendingAnswer.value = null; r('yes')  } }
-function answerNo()   { if (pendingAnswer.value) { const r = pendingAnswer.value; pendingAnswer.value = null; r('no')   } }
-function answerWake() { if (pendingAnswer.value) { const r = pendingAnswer.value; pendingAnswer.value = null; r('wake') } }
+function answerYes()  { clearAutoYes(); if (pendingAnswer.value) { const r = pendingAnswer.value; pendingAnswer.value = null; r('yes')  } }
+function answerNo()   { clearAutoYes(); if (pendingAnswer.value) { const r = pendingAnswer.value; pendingAnswer.value = null; r('no')   } }
+function answerWake() { clearAutoYes(); if (pendingAnswer.value) { const r = pendingAnswer.value; pendingAnswer.value = null; r('wake') } }
 
 async function submitText() {
   if (!transcript.value.trim() || phase.value !== 'idle') return
@@ -481,6 +519,9 @@ const inConfirm = computed(() => phase.value === 'confirm-text' || phase.value =
           </div>
           <div class="text-xs text-slate-500 mt-2">{{ confirmDetail }}</div>
           <div v-if="heardAnswer" class="text-xs text-slate-400 mt-1">听到: {{ heardAnswer }}</div>
+          <div v-if="phase === 'confirm-text' && autoYesArmedAt > 0" class="text-xs text-emerald-700 mt-1">
+            ⏱ {{ autoYesCountdown }} 秒后自动确认 (说"取消"或点 ✗ 可中止)
+          </div>
         </div>
       </div>
       <div class="flex gap-3 justify-end flex-wrap">
@@ -571,7 +612,43 @@ const inConfirm = computed(() => phase.value === 'confirm-text' || phase.value =
       <div v-if="voice.error.value" class="mt-2 text-xs bg-red-500/30 rounded p-2">{{ voice.error.value }}</div>
     </div>
 
-    <!-- Latest result (1/3 of row 1) -->
+    <!-- Row 1 right: session history (was: latest result — swapped to keep latest result
+         next to the 3D preview for at-a-glance correlation). -->
+      <div class="card p-4 space-y-2 lg:col-span-1">
+        <div class="font-semibold">本次会话</div>
+        <div v-if="!history.length" class="text-sm text-slate-400 py-12 text-center">暂无对话</div>
+        <ul v-else class="space-y-2 max-h-[480px] overflow-auto">
+          <li v-for="(h, i) in history" :key="i" class="text-xs border-l-2 pl-2"
+              :class="h.executed ? 'border-emerald-400' : (h.intent === 'unknown' ? 'border-slate-300' : 'border-amber-400')">
+            <div class="text-slate-400">{{ fmt(h.time) }} · {{ intentLabel[h.intent] || h.intent }} · {{ (h.confidence*100).toFixed(0) }}%</div>
+            <div class="text-slate-700">{{ h.text }}</div>
+            <div class="text-slate-500">↳ {{ h.speech }}</div>
+          </li>
+        </ul>
+      </div>
+    </div>
+
+    <!-- Row 2: 3D preview (2/3) + latest result (1/3) -->
+    <div class="grid gap-4 lg:grid-cols-3">
+      <div ref="sceneSection" class="card p-4 space-y-2 lg:col-span-2 scroll-mt-20">
+        <div class="flex items-center justify-between">
+          <div class="font-semibold">家中位置预览</div>
+          <button class="text-xs text-slate-400 hover:text-slate-700" @click="loadScene">↻ 刷新</button>
+        </div>
+        <div v-if="!sceneLocations.length" class="text-sm text-slate-400 py-12 text-center">
+          还没有 3D 布局,去 "🏗 3D" 标签先搭一下房间。
+        </div>
+        <Scene3D v-else :locations="sceneLocations" :items="sceneItems"
+                 :highlight-item-id="sceneHighlightItem"
+                 :highlight-item-ids="sceneHighlightIds"
+                 :highlight-location-id="sceneHighlightLoc"
+                 :low-quality="lowQuality"
+                 :show-items-in-room-ids="shownItemRoomIds"
+                 :height="'clamp(420px, 63vh, 780px)'"
+                 @update:low-quality="lowQuality = $event" />
+        <div class="text-xs text-slate-400">语音找到物品时这里会自动推进镜头并高亮目标(其余区域半透淡出)。</div>
+      </div>
+
       <div class="card p-4 space-y-3 lg:col-span-1">
         <div class="flex items-center justify-between">
           <div class="font-semibold">最新识别结果</div>
@@ -628,41 +705,6 @@ const inConfirm = computed(() => phase.value === 'confirm-text' || phase.value =
             </ul>
           </div>
         </div>
-      </div>
-    </div>
-
-    <!-- Row 2: 3D preview (2/3) + session history (1/3) -->
-    <div class="grid gap-4 lg:grid-cols-3">
-      <div ref="sceneSection" class="card p-4 space-y-2 lg:col-span-2 scroll-mt-20">
-        <div class="flex items-center justify-between">
-          <div class="font-semibold">家中位置预览</div>
-          <button class="text-xs text-slate-400 hover:text-slate-700" @click="loadScene">↻ 刷新</button>
-        </div>
-        <div v-if="!sceneLocations.length" class="text-sm text-slate-400 py-12 text-center">
-          还没有 3D 布局,去 "🏗 3D" 标签先搭一下房间。
-        </div>
-        <Scene3D v-else :locations="sceneLocations" :items="sceneItems"
-                 :highlight-item-id="sceneHighlightItem"
-                 :highlight-item-ids="sceneHighlightIds"
-                 :highlight-location-id="sceneHighlightLoc"
-                 :low-quality="lowQuality"
-                 :show-items-in-room-ids="shownItemRoomIds"
-                 :height="'clamp(280px, 42vh, 520px)'"
-                 @update:low-quality="lowQuality = $event" />
-        <div class="text-xs text-slate-400">语音找到物品时这里会自动推进镜头并高亮目标(其余区域半透淡出)。</div>
-      </div>
-
-      <div class="card p-4 space-y-2 lg:col-span-1">
-        <div class="font-semibold">本次会话</div>
-        <div v-if="!history.length" class="text-sm text-slate-400 py-12 text-center">暂无对话</div>
-        <ul v-else class="space-y-2 max-h-[480px] overflow-auto">
-          <li v-for="(h, i) in history" :key="i" class="text-xs border-l-2 pl-2"
-              :class="h.executed ? 'border-emerald-400' : (h.intent === 'unknown' ? 'border-slate-300' : 'border-amber-400')">
-            <div class="text-slate-400">{{ fmt(h.time) }} · {{ intentLabel[h.intent] || h.intent }} · {{ (h.confidence*100).toFixed(0) }}%</div>
-            <div class="text-slate-700">{{ h.text }}</div>
-            <div class="text-slate-500">↳ {{ h.speech }}</div>
-          </li>
-        </ul>
       </div>
     </div>
 

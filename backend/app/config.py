@@ -37,6 +37,7 @@ class VoiceConfig(BaseModel):
         description="发送给 LLM 前先口头确认识别文本是否正确,节省 token",
     )
     # TTS — names depend on the browser. Empty = browser default.
+    tts_enabled: bool = Field(default=True, description="是否朗读 AI 结果")
     tts_voice: str = Field(default="")
     tts_lang: str = Field(default="zh-CN")
     tts_rate: float = Field(default=1.05, ge=0.5, le=2.0)

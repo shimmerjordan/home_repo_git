@@ -20,6 +20,7 @@ const presets = [
 
 async function load() {
   cfg.value = await api.getSettings()
+  if (cfg.value?.voice && cfg.value.voice.tts_enabled === undefined) cfg.value.voice.tts_enabled = true
   apiKeyInput.value = ''
 }
 
@@ -80,6 +81,7 @@ async function save() {
       wake_words: (cfg.value.voice.wake_words || []).map((s) => s.trim()).filter(Boolean),
       confidence_threshold: parseFloat(cfg.value.voice.confidence_threshold),
       confirm_before_llm: !!cfg.value.voice.confirm_before_llm,
+      tts_enabled: !!cfg.value.voice.tts_enabled,
       tts_voice: cfg.value.voice.tts_voice || '',
       tts_lang: cfg.value.voice.tts_lang || 'zh-CN',
       tts_rate: parseFloat(cfg.value.voice.tts_rate) || 1.05,
@@ -193,7 +195,13 @@ const wakeWordsText = computed({
         <div class="text-xs text-slate-500 mt-1">开启后:每条指令在调 AI API 前会播报"你说的是…确认吗",省 token。关闭后直接发送。</div>
       </div>
       <div class="border-t pt-3 space-y-2">
-        <div class="font-medium text-sm">TTS 音色 (浏览器内置)</div>
+        <div class="flex items-center justify-between">
+          <div class="font-medium text-sm">TTS 音色 (浏览器内置)</div>
+          <label class="flex items-center gap-1.5 text-xs">
+            <input type="checkbox" v-model="cfg.voice.tts_enabled" /> 朗读 AI 结果
+          </label>
+        </div>
+        <div class="text-xs text-slate-500">关闭后只显示文字, 不发声 — 也能进一步加快响应.</div>
         <div>
           <label class="label">音色</label>
           <select v-model="cfg.voice.tts_voice" class="input">

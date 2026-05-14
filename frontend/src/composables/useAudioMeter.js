@@ -12,20 +12,18 @@ export function useAudioMeter({ bars = 32 } = {}) {
   let ctx = null
   let analyser = null
   let raf = 0
+  let resumeListener = null
 
   async function start() {
     if (active.value) return
     error.value = ''
-    // iOS Safari quirks:
-    //   1. AudioContext MUST be created within a user-gesture frame, otherwise it stays
-    //      suspended and analyser bytes are all 0. We instantiate BEFORE the awaited
-    //      getUserMedia so we're still in the gesture stack.
-    //   2. AGC/NS/echoCancellation default ON, which on iPad squashes the meter to ~0
-    //      for normal voice. We disable them — Web Speech API has its own pipeline.
-    //   3. After getUserMedia we resume() explicitly; some iOS versions need both.
     const Ctor = window.AudioContext || window.webkitAudioContext
     if (!Ctor) { error.value = '浏览器不支持 AudioContext'; return }
+    // iOS Safari requires AudioContext.resume() to be called SYNCHRONOUSLY inside a
+    // user-gesture handler. Awaiting getUserMedia first kicks us out of the gesture
+    // frame, so we must resume() right after construction — before any await.
     ctx = new Ctor()
+    try { ctx.resume() } catch {}
     try {
       stream = await navigator.mediaDevices.getUserMedia({
         audio: {
@@ -45,13 +43,27 @@ export function useAudioMeter({ bars = 32 } = {}) {
         return
       }
     }
+    // Defensive second resume — some iOS versions need both pre- and post-await.
     if (ctx.state === 'suspended') { try { await ctx.resume() } catch {} }
+
+    // iOS occasionally suspends the AudioContext when SpeechRecognition or
+    // SpeechSynthesis grab the audio session. Hook a global touch listener that
+    // resumes the context the next time the user touches the page — that's a
+    // legitimate gesture frame and brings the meter back to life.
+    resumeListener = () => {
+      if (ctx && ctx.state === 'suspended') { try { ctx.resume() } catch {} }
+    }
+    window.addEventListener('touchstart', resumeListener, { passive: true })
+    window.addEventListener('click', resumeListener, { passive: true })
+    document.addEventListener('visibilitychange', resumeListener)
+
     const src = ctx.createMediaStreamSource(stream)
     analyser = ctx.createAnalyser()
     analyser.fftSize = 512
     analyser.smoothingTimeConstant = 0.7
     src.connect(analyser)
     const buf = new Uint8Array(analyser.frequencyBinCount)
+    const timeBuf = new Uint8Array(analyser.fftSize)
     active.value = true
 
     const tick = () => {
@@ -68,7 +80,18 @@ export function useAudioMeter({ bars = 32 } = {}) {
         total += v
       }
       levels.value = out
-      rms.value = total / bars
+      // Compute RMS from the time-domain waveform instead of the frequency bins —
+      // iPad's frequency analyser is heavily smoothed/auto-gained and reads near 0
+      // for normal speech, while the time-domain bytes track real loudness reliably.
+      analyser.getByteTimeDomainData(timeBuf)
+      let acc = 0
+      for (let i = 0; i < timeBuf.length; i++) {
+        const c = (timeBuf[i] - 128) / 128
+        acc += c * c
+      }
+      const rmsRaw = Math.sqrt(acc / timeBuf.length)
+      // Map to 0..1 with a soft floor so quiet rooms don't show full bar.
+      rms.value = Math.min(1, rmsRaw * 3)
       raf = requestAnimationFrame(tick)
     }
     raf = requestAnimationFrame(tick)
@@ -78,6 +101,12 @@ export function useAudioMeter({ bars = 32 } = {}) {
     active.value = false
     if (raf) cancelAnimationFrame(raf)
     raf = 0
+    if (resumeListener) {
+      window.removeEventListener('touchstart', resumeListener)
+      window.removeEventListener('click', resumeListener)
+      document.removeEventListener('visibilitychange', resumeListener)
+      resumeListener = null
+    }
     if (analyser) { try { analyser.disconnect() } catch {}; analyser = null }
     if (ctx) { try { ctx.close() } catch {}; ctx = null }
     if (stream) { stream.getTracks().forEach((t) => t.stop()); stream = null }

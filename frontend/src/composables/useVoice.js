@@ -196,21 +196,59 @@ export function useVoice({ wakeWordsRef, useWhisperRef, lang = 'zh-CN' } = {}) {
     return { result: classifyYesNo(text), text, error: err }
   }
 
-  async function listenAnswer({ timeout = 6000 } = {}) {
-    const { text, error: err } = await captureUtterance({ timeout })
+  async function listenAnswer({ timeout = 3500 } = {}) {
+    // Yes/no/wake is a single short word — keep the SR window tight so the UI feels
+    // snappy. Also: stop on the first interim result so we don't wait for the full
+    // window when the user already said "确定".
+    const { text, error: err } = await _captureShortSR({ timeout })
     return { result: classifyAnswer(text, getWakeWords()), text, error: err }
+  }
+
+  // Variant of _captureWithSR tuned for confirmations: bails as soon as we see ANY
+  // interim transcript that matches yes/no/wake, instead of waiting for the SR engine
+  // to declare a "final" result (which on iPad can lag 1-2 seconds after speech ends).
+  function _captureShortSR({ timeout }) {
+    return new Promise((resolve) => {
+      if (!SR) { resolve({ text: '', error: 'SR 不支持' }); return }
+      const r = new SR()
+      r.lang = lang
+      r.continuous = false
+      r.interimResults = true
+      r.maxAlternatives = 1
+      let done = false
+      const finish = (text, err) => {
+        if (done) return
+        done = true
+        try { r.stop() } catch {}
+        try { r.abort?.() } catch {}
+        resolve({ text: text || '', error: err || '' })
+      }
+      r.onresult = (ev) => {
+        let combined = ''
+        for (let i = 0; i < ev.results.length; i++) combined += ev.results[i][0]?.transcript || ''
+        if (!combined) return
+        // Early-exit on a definitive classification — avoids waiting for "final".
+        const cls = classifyAnswer(combined, getWakeWords())
+        if (cls !== 'unknown' || ev.results[ev.results.length - 1].isFinal) finish(combined)
+      }
+      r.onerror = (ev) => finish('', ev.error)
+      r.onend = () => { if (!done) finish('') }
+      try { r.start() } catch (e) { finish('', String(e.message || e)) }
+      setTimeout(() => finish(''), timeout)
+    })
   }
 
   // ---- TTS ----
 
   // Mutable TTS settings; setTtsConfig() is called from the panel whenever settings change.
-  const ttsConfig = { voice: '', lang, rate: 1.05, pitch: 1.0 }
+  const ttsConfig = { voice: '', lang, rate: 1.05, pitch: 1.0, enabled: true }
 
   function setTtsConfig(cfg = {}) {
     if (cfg.voice !== undefined) ttsConfig.voice = cfg.voice
     if (cfg.lang) ttsConfig.lang = cfg.lang
     if (cfg.rate !== undefined && Number.isFinite(+cfg.rate)) ttsConfig.rate = +cfg.rate
     if (cfg.pitch !== undefined && Number.isFinite(+cfg.pitch)) ttsConfig.pitch = +cfg.pitch
+    if (cfg.enabled !== undefined) ttsConfig.enabled = !!cfg.enabled
   }
 
   function _findVoice(name) {
@@ -223,9 +261,13 @@ export function useVoice({ wakeWordsRef, useWhisperRef, lang = 'zh-CN' } = {}) {
     if (!text || typeof window === 'undefined' || !window.speechSynthesis) {
       return Promise.resolve()
     }
+    if (ttsConfig.enabled === false && !overrides.force) return Promise.resolve()
     return new Promise((resolve) => {
       try {
         window.speechSynthesis.cancel()
+        // iOS Safari occasionally leaves the queue paused after rapid cancel/speak
+        // pairs (e.g. when meter+SR also held the audio session). Resume defensively.
+        try { window.speechSynthesis.resume() } catch {}
         const u = new SpeechSynthesisUtterance(text)
         u.lang = overrides.lang || ttsConfig.lang || lang
         u.rate = overrides.rate ?? ttsConfig.rate ?? 1.05
