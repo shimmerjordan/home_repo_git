@@ -191,15 +191,15 @@ async def _handle_async(text: str, chat_id: str, cfg) -> None:
 def _run_ws_client(app_id: str, app_secret: str) -> None:
     """Body of the WS thread — blocks on lark's client.start().
 
-    CRITICAL: lark's WebSocket client calls `asyncio.get_event_loop()` and then
-    `loop.run_until_complete()`. Without an explicit per-thread event loop,
-    Python falls back to creating a new one OR (worse) inheriting state across
-    restarts that leaves a stale loop in a "running" state. We give the thread
-    its own fresh event loop here — that's what fixes "this event loop is
-    already running" on the second connect attempt.
+    CRITICAL: uvicorn installs **uvloop** as the global event-loop policy. uvloop
+    has thread-affinity quirks: even a freshly-`asyncio.new_event_loop()`-created
+    uvloop instance reports "this event loop is already running" when lark's
+    `loop.run_until_complete()` is called from a worker thread. Workaround: build
+    a vanilla **stdlib** SelectorEventLoop via the default policy, bypassing
+    whatever global policy uvicorn set, and pin it to this thread.
     """
     global _ws_client, _api_client, _consecutive_failures
-    new_loop = asyncio.new_event_loop()
+    new_loop = asyncio.DefaultEventLoopPolicy().new_event_loop()
     asyncio.set_event_loop(new_loop)
     started_at = time.monotonic()
     try:

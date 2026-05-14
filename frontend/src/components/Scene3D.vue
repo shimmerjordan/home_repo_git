@@ -135,7 +135,13 @@ function init() {
     transformControls = new TransformControls(camera, renderer.domElement)
     transformControls.size = 0.7
     transformControls.setSpace('world')
-    scene.add(transformControls)
+    // Three.js r170+ split TransformControls: the controller itself is no longer
+    // an Object3D, so adding it to the scene fails with "not an instance of
+    // THREE.Object3D". Use .getHelper() to get the visual gizmo Object3D.
+    const tcHelper = typeof transformControls.getHelper === 'function'
+      ? transformControls.getHelper()
+      : transformControls
+    scene.add(tcHelper)
     transformControls.addEventListener('dragging-changed', (ev) => {
       controls.enabled = !ev.value
       if (!ev.value) commitTransform()
