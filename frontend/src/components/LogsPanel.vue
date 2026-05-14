@@ -17,6 +17,55 @@ const front = clientLog()
 const meter = useAudioMeter({ bars: 28 })
 
 let timer = null
+const logScroll = ref(null)
+const copyHint = ref('')
+let copyHintTimer = null
+function flashHint(msg) {
+  copyHint.value = msg
+  if (copyHintTimer) clearTimeout(copyHintTimer)
+  copyHintTimer = setTimeout(() => { copyHint.value = '' }, 1500)
+}
+
+// True while the user is selecting text inside the log viewer — we pause
+// auto-refresh in that case so the rerender doesn't blow away the selection.
+const userSelecting = ref(false)
+function updateSelectionState() {
+  const sel = window.getSelection?.()
+  if (!sel || sel.isCollapsed) { userSelecting.value = false; return }
+  const node = sel.anchorNode
+  if (node && logScroll.value && logScroll.value.contains(node.nodeType === 1 ? node : node.parentElement)) {
+    userSelecting.value = true
+  } else {
+    userSelecting.value = false
+  }
+}
+
+function scrollToTop() {
+  if (logScroll.value) logScroll.value.scrollTo({ top: 0, behavior: 'smooth' })
+}
+
+async function copyAll() {
+  const text = merged.value.map(formatRow).join('\n')
+  try {
+    await navigator.clipboard.writeText(text)
+    flashHint(`已复制 ${merged.value.length} 行`)
+  } catch (e) {
+    flashHint('复制失败: ' + (e.message || e))
+  }
+}
+
+async function copyRow(e) {
+  try {
+    await navigator.clipboard.writeText(formatRow(e))
+    flashHint('已复制本行')
+  } catch (err) {
+    flashHint('复制失败')
+  }
+}
+
+function formatRow(e) {
+  return `[${fmt(e.time)}] [${e.level}] [${e.source}] ${e.message}`
+}
 
 async function loadDiag() {
   try { diag.value = await api.getDiag() } catch (e) { logEvent('ERROR', 'getDiag failed: ' + e.message) }
@@ -35,9 +84,16 @@ async function loadLogs(reset = false) {
 onMounted(async () => {
   await loadDiag()
   await loadLogs(true)
-  timer = setInterval(() => { if (autoRefresh.value) loadLogs() }, 3000)
+  // Pause auto-refresh while the user is selecting text in the log viewer —
+  // otherwise the 3s re-render clears the selection mid-copy.
+  timer = setInterval(() => { if (autoRefresh.value && !userSelecting.value) loadLogs() }, 3000)
+  document.addEventListener('selectionchange', updateSelectionState)
 })
-onBeforeUnmount(() => { clearInterval(timer); meter.stop() })
+onBeforeUnmount(() => {
+  clearInterval(timer); meter.stop()
+  document.removeEventListener('selectionchange', updateSelectionState)
+  if (copyHintTimer) clearTimeout(copyHintTimer)
+})
 watch(levelFilter, () => loadLogs(true))
 
 // Client-side capability checks
@@ -193,7 +249,7 @@ const lvlClass = {
     </div>
 
     <!-- Logs viewer -->
-    <div class="card">
+    <div class="card relative">
       <div class="px-3 py-2 border-b border-slate-200 flex flex-wrap gap-2 items-center">
         <div class="font-semibold mr-3">运行日志</div>
         <select v-model="showSource" class="input w-auto text-sm">
@@ -209,20 +265,44 @@ const lvlClass = {
           <option value="ERROR">仅 ERROR</option>
         </select>
         <input v-model="search" class="input flex-1 min-w-[160px] text-sm" placeholder="搜索关键字" />
-        <label class="text-xs flex items-center gap-1"><input type="checkbox" v-model="autoRefresh" /> 自动刷新</label>
-        <button class="btn btn-secondary text-xs" @click="loadLogs(true); loadDiag()">↻</button>
+        <label class="text-xs flex items-center gap-1"
+               :title="userSelecting ? '你正在选择文字 — 暂时不刷新' : ''">
+          <input type="checkbox" v-model="autoRefresh" />
+          自动刷新<span v-if="userSelecting" class="text-amber-600">(已暂停)</span>
+        </label>
+        <button class="btn btn-secondary text-xs" @click="copyAll" :disabled="!merged.length"
+                title="复制当前显示的所有日志到剪贴板">📋 复制全部</button>
+        <button class="btn btn-secondary text-xs" @click="loadLogs(true); loadDiag()" title="刷新">↻</button>
       </div>
-      <div class="max-h-[480px] overflow-auto font-mono text-xs">
+      <!-- select-text: explicit user-select:text overrides any global rule from
+           parent stacks (e.g. button-styled rows). Critical for copy on iPad
+           where long-press selection is the only way. -->
+      <div ref="logScroll" class="max-h-[480px] overflow-auto font-mono text-xs"
+           style="user-select: text; -webkit-user-select: text;">
         <div v-if="!merged.length" class="p-6 text-center text-slate-400">暂无日志</div>
         <div v-for="e in merged" :key="e.source + '-' + e.id"
-             class="px-3 py-1.5 border-b border-slate-50 hover:bg-slate-50 flex gap-2 items-start">
-          <span class="text-slate-400 whitespace-nowrap">{{ fmt(e.time) }}</span>
-          <span :class="['px-1.5 rounded', lvlClass[e.level] || 'bg-slate-100']">{{ e.level }}</span>
-          <span :class="['tag', e.source === 'client' ? 'bg-blue-100 text-blue-700' : 'bg-slate-200 text-slate-700']">
+             class="group px-3 py-1.5 border-b border-slate-50 hover:bg-slate-50 flex gap-2 items-start"
+             style="user-select: text; -webkit-user-select: text;">
+          <span class="text-slate-400 whitespace-nowrap select-text">{{ fmt(e.time) }}</span>
+          <span :class="['px-1.5 rounded shrink-0 select-text', lvlClass[e.level] || 'bg-slate-100']">{{ e.level }}</span>
+          <span :class="['tag shrink-0 select-text', e.source === 'client' ? 'bg-blue-100 text-blue-700' : 'bg-slate-200 text-slate-700']">
             {{ e.source }}
           </span>
-          <span class="flex-1 break-all whitespace-pre-wrap">{{ e.message }}</span>
+          <span class="flex-1 break-all whitespace-pre-wrap select-text cursor-text">{{ e.message }}</span>
+          <button class="opacity-0 group-hover:opacity-100 transition text-slate-400 hover:text-slate-700 shrink-0"
+                  @click="copyRow(e)" title="复制本行">📋</button>
         </div>
+      </div>
+      <!-- Floating scroll-to-top button (newest log lives at top so this is
+           effectively "jump to newest"). Plus a transient toast for copy feedback. -->
+      <button v-show="merged.length"
+              class="absolute right-3 bottom-3 px-2.5 py-1.5 rounded-full bg-slate-900 text-white shadow-lg text-xs hover:bg-slate-700"
+              @click="scrollToTop" title="回到最新">
+        ⬆ 顶部
+      </button>
+      <div v-if="copyHint"
+           class="absolute left-1/2 -translate-x-1/2 bottom-3 px-3 py-1.5 rounded bg-emerald-600 text-white text-xs shadow-lg">
+        {{ copyHint }}
       </div>
     </div>
   </div>
