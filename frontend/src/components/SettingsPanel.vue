@@ -9,6 +9,15 @@ const saving = ref(false)
 const testResult = ref('')
 const errorMsg = ref('')
 const apiKeyInput = ref('')  // empty means leave unchanged
+const dtSignSecretInput = ref('')   // empty = leave unchanged
+const dtAllowedInput = ref('')      // textarea, newline-separated
+const tgTokenInput = ref('')        // empty = leave unchanged
+const tgChatsInput = ref('')
+const tgUsersInput = ref('')
+const fsSecretInput = ref('')       // empty = leave unchanged
+const fsChatsInput = ref('')
+const fsUsersInput = ref('')
+const origin = typeof window !== 'undefined' ? window.location.origin : ''
 
 const presets = [
   { label: 'OpenAI', base_url: 'https://api.openai.com/v1', model: 'gpt-4o-mini', supports_tools: true },
@@ -21,7 +30,18 @@ const presets = [
 async function load() {
   cfg.value = await api.getSettings()
   if (cfg.value?.voice && cfg.value.voice.tts_enabled === undefined) cfg.value.voice.tts_enabled = true
+  if (!cfg.value.dingtalk) cfg.value.dingtalk = { enabled: false, sign_secret: '', allowed_users: [] }
+  if (!cfg.value.telegram) cfg.value.telegram = { enabled: false, bot_token: '', allowed_chat_ids: [], allowed_user_ids: [] }
+  if (!cfg.value.feishu) cfg.value.feishu = { enabled: false, app_id: '', app_secret: '', allowed_chat_ids: [], allowed_open_ids: [] }
   apiKeyInput.value = ''
+  dtSignSecretInput.value = ''
+  dtAllowedInput.value = (cfg.value.dingtalk.allowed_users || []).join('\n')
+  tgTokenInput.value = ''
+  tgChatsInput.value = (cfg.value.telegram.allowed_chat_ids || []).join('\n')
+  tgUsersInput.value = (cfg.value.telegram.allowed_user_ids || []).join('\n')
+  fsSecretInput.value = ''
+  fsChatsInput.value = (cfg.value.feishu.allowed_chat_ids || []).join('\n')
+  fsUsersInput.value = (cfg.value.feishu.allowed_open_ids || []).join('\n')
 }
 
 const voices = ref([])
@@ -89,7 +109,26 @@ async function save() {
       whisper_url: cfg.value.voice.whisper_url,
       whisper_enabled: !!cfg.value.voice.whisper_enabled,
     }
-    await api.updateSettings({ llm, voice })
+    const dingtalk = {
+      enabled: !!cfg.value.dingtalk?.enabled,
+      allowed_users: (dtAllowedInput.value || '')
+        .split('\n').map((s) => s.trim()).filter(Boolean),
+    }
+    if (dtSignSecretInput.value) dingtalk.sign_secret = dtSignSecretInput.value
+    const telegram = {
+      enabled: !!cfg.value.telegram?.enabled,
+      allowed_chat_ids: (tgChatsInput.value || '').split('\n').map((s) => s.trim()).filter(Boolean),
+      allowed_user_ids: (tgUsersInput.value || '').split('\n').map((s) => s.trim()).filter(Boolean),
+    }
+    if (tgTokenInput.value) telegram.bot_token = tgTokenInput.value
+    const feishu = {
+      enabled: !!cfg.value.feishu?.enabled,
+      app_id: cfg.value.feishu?.app_id || '',
+      allowed_chat_ids: (fsChatsInput.value || '').split('\n').map((s) => s.trim()).filter(Boolean),
+      allowed_open_ids: (fsUsersInput.value || '').split('\n').map((s) => s.trim()).filter(Boolean),
+    }
+    if (fsSecretInput.value) feishu.app_secret = fsSecretInput.value
+    await api.updateSettings({ llm, voice, dingtalk, telegram, feishu })
     await load()
     emit('saved')
   } catch (e) { errorMsg.value = String(e.message || e) }
@@ -245,6 +284,115 @@ const wakeWordsText = computed({
       <div>
         <label class="label">Whisper Service URL</label>
         <input v-model="cfg.voice.whisper_url" class="input" />
+      </div>
+      <button class="btn btn-primary" :disabled="saving" @click="save">保存</button>
+    </div>
+
+    <!-- DingTalk bot integration (full-width card under the LLM+Voice cards) -->
+    <div class="card p-4 space-y-3 md:col-span-2">
+      <div class="font-semibold flex items-center gap-2">
+        🤖 钉钉机器人
+        <span class="text-xs text-slate-400 font-normal">通过 @机器人 在群里查询/操作仓储</span>
+      </div>
+      <label class="flex items-center gap-2 text-sm">
+        <input type="checkbox" v-model="cfg.dingtalk.enabled" /> 启用钉钉 Webhook
+      </label>
+      <div>
+        <label class="label">加签秘钥 (Sign Secret){{ cfg.dingtalk.sign_secret_set ? ' (已设置, 留空保持)' : '' }}</label>
+        <input v-model="dtSignSecretInput" type="password" class="input"
+               :placeholder="cfg.dingtalk.sign_secret_set ? '••••' : 'SEC...'" />
+        <div class="text-xs text-slate-500 mt-1">
+          在钉钉群 → 机器人管理 → 自定义机器人 → 安全设置选"加签", 复制 SEC 开头的秘钥粘到这里。
+        </div>
+      </div>
+      <div>
+        <label class="label">白名单 (一行一个 staffId 或 nick, 留空允许所有人)</label>
+        <textarea v-model="dtAllowedInput" rows="2" class="input font-mono text-xs"
+                  placeholder="zhangsan&#10;lisi"></textarea>
+      </div>
+      <div class="border-t pt-3">
+        <div class="label">Webhook 地址</div>
+        <div class="font-mono text-xs bg-slate-50 p-2 rounded select-all break-all">
+          {{ origin }}/api/dingtalk/webhook
+        </div>
+        <div class="text-xs text-slate-500 mt-1">
+          把这个地址粘到钉钉的"自定义机器人"配置里。<br>
+          钉钉服务器需要能访问这个 URL — 家里部署要做端口转发或用 frp/cloudflared 暴露。详见 README。
+        </div>
+      </div>
+      <button class="btn btn-primary" :disabled="saving" @click="save">保存</button>
+    </div>
+
+    <!-- Telegram bot (long-polling, no public IP required) -->
+    <div class="card p-4 space-y-3 md:col-span-2">
+      <div class="font-semibold flex items-center gap-2">
+        ✈️ Telegram 机器人
+        <span class="text-xs text-slate-400 font-normal">长轮询 · 无需公网 IP · 国内需翻墙</span>
+      </div>
+      <label class="flex items-center gap-2 text-sm">
+        <input type="checkbox" v-model="cfg.telegram.enabled" /> 启用 Telegram 长轮询
+      </label>
+      <div>
+        <label class="label">Bot Token{{ cfg.telegram.bot_token_set ? ' (已设置, 留空保持)' : '' }}</label>
+        <input v-model="tgTokenInput" type="password" class="input"
+               :placeholder="cfg.telegram.bot_token_set ? '••••' : '123456:ABC-DEF1234...'" />
+        <div class="text-xs text-slate-500 mt-1">
+          在 Telegram 找 <b>@BotFather</b> → /newbot → 拿到 token 粘到这里。NAS 主动连 api.telegram.org, 不需要任何端口转发。
+        </div>
+      </div>
+      <div class="grid grid-cols-1 md:grid-cols-2 gap-2">
+        <div>
+          <label class="label">白名单 chat_id (一行一个, 留空允许所有)</label>
+          <textarea v-model="tgChatsInput" rows="2" class="input font-mono text-xs"
+                    placeholder="-1001234567890&#10;987654321"></textarea>
+          <div class="text-xs text-slate-500 mt-1">群 id 是负数, 个人 id 是正数。把 bot 加到群后随便发一句, 看日志页能看到 chat_id。</div>
+        </div>
+        <div>
+          <label class="label">白名单 user_id (一行一个, 留空允许所有)</label>
+          <textarea v-model="tgUsersInput" rows="2" class="input font-mono text-xs"
+                    placeholder="123456789"></textarea>
+        </div>
+      </div>
+      <button class="btn btn-primary" :disabled="saving" @click="save">保存</button>
+    </div>
+
+    <!-- Feishu / Lark bot via Stream Mode (long-lived WebSocket, no public IP) -->
+    <div class="card p-4 space-y-3 md:col-span-2">
+      <div class="font-semibold flex items-center gap-2">
+        🪶 飞书机器人 (Stream Mode)
+        <span class="text-xs text-slate-400 font-normal">WebSocket 长连接 · 无需公网 IP · 国内可用</span>
+      </div>
+      <label class="flex items-center gap-2 text-sm">
+        <input type="checkbox" v-model="cfg.feishu.enabled" /> 启用飞书长连接
+      </label>
+      <div class="grid grid-cols-1 md:grid-cols-2 gap-2">
+        <div>
+          <label class="label">App ID</label>
+          <input v-model="cfg.feishu.app_id" class="input" placeholder="cli_xxxxxxx" />
+        </div>
+        <div>
+          <label class="label">App Secret{{ cfg.feishu.app_secret_set ? ' (已设置, 留空保持)' : '' }}</label>
+          <input v-model="fsSecretInput" type="password" class="input"
+                 :placeholder="cfg.feishu.app_secret_set ? '••••' : ''" />
+        </div>
+      </div>
+      <div class="text-xs text-slate-500">
+        在 <a href="https://open.feishu.cn/app" target="_blank" class="text-blue-600 underline">飞书开放平台</a>
+        创建"自建应用",拿到 App ID + App Secret;开通 <b>"接收消息"</b> 权限,订阅
+        <code>im.message.receive_v1</code> 事件,并把"事件订阅方式"改为
+        <b>"长连接"</b>(Stream Mode)。详见 <code>docs/bots/feishu.md</code>。
+      </div>
+      <div class="grid grid-cols-1 md:grid-cols-2 gap-2">
+        <div>
+          <label class="label">白名单 chat_id (一行一个, 留空允许所有)</label>
+          <textarea v-model="fsChatsInput" rows="2" class="input font-mono text-xs"
+                    placeholder="oc_xxxxxx"></textarea>
+        </div>
+        <div>
+          <label class="label">白名单 open_id (一行一个, 留空允许所有)</label>
+          <textarea v-model="fsUsersInput" rows="2" class="input font-mono text-xs"
+                    placeholder="ou_xxxxxx"></textarea>
+        </div>
       </div>
       <button class="btn btn-primary" :disabled="saving" @click="save">保存</button>
     </div>

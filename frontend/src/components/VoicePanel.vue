@@ -35,10 +35,24 @@ function loadShownRooms() {
   return []
 }
 const shownItemRoomIds = ref(loadShownRooms())
-// Pick up changes other tabs make to the toggle (BuildingPanel writes here).
+
+// Same persistence channel as BuildingPanel — keep both viewers focused on the same
+// home so what you see on the home tab matches what the 3D editor tab is showing.
+const HOME_KEY = 'storage.activeHomeId'
+function loadActiveHome() {
+  try {
+    const raw = localStorage.getItem(HOME_KEY)
+    if (raw && raw !== 'null') return +raw || null
+  } catch {}
+  return null
+}
+const activeHomeId = ref(loadActiveHome())
+
+// Pick up changes other tabs make (BuildingPanel writes shownItemRoomIds + active home).
 if (typeof window !== 'undefined') {
   window.addEventListener('storage', (ev) => {
     if (ev.key === SHOWN_ITEMS_KEY) shownItemRoomIds.value = loadShownRooms()
+    if (ev.key === HOME_KEY) activeHomeId.value = loadActiveHome()
   })
 }
 
@@ -99,6 +113,9 @@ const micMuted = ref(false)
 const resultSeq = ref(0)
 
 async function loadScene() {
+  // Storage events don't fire in the same tab — re-read the active home from
+  // localStorage on every refresh so changes made in BuildingPanel show up here.
+  activeHomeId.value = loadActiveHome()
   try {
     const [locs, its] = await Promise.all([api.listLocations(), api.listItems({ limit: 1000 })])
     sceneLocations.value = locs
@@ -644,6 +661,7 @@ const inConfirm = computed(() => phase.value === 'confirm-text' || phase.value =
                  :highlight-location-id="sceneHighlightLoc"
                  :low-quality="lowQuality"
                  :show-items-in-room-ids="shownItemRoomIds"
+                 :active-home-id="activeHomeId"
                  :height="'clamp(420px, 63vh, 780px)'"
                  @update:low-quality="lowQuality = $event" />
         <div class="text-xs text-slate-400">语音找到物品时这里会自动推进镜头并高亮目标(其余区域半透淡出)。</div>

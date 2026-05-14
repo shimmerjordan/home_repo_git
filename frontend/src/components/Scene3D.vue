@@ -26,6 +26,9 @@ const props = defineProps({
   // currently-highlighted item is ALWAYS visible regardless of this list, so a
   // voice search still gets a pulsing target.
   showItemsInRoomIds: { type: Array, default: () => [] },
+  // Home filter. When set, only locations whose ancestor chain includes this id
+  // are rendered (rooms without any home ancestor are shown when this is null).
+  activeHomeId: { type: Number, default: null },
 })
 const emit = defineEmits(['select-location', 'select-item', 'transform-end', 'update:low-quality'])
 
@@ -157,6 +160,26 @@ function init() {
   resizeObserver.observe(container.value)
 }
 
+// Map each location to its first 'home' ancestor (or null if none).
+function computeHomeAncestors(locs) {
+  const byId = new Map(locs.map((l) => [l.id, l]))
+  const out = new Map()
+  for (const l of locs) {
+    let cur = l.id
+    const seen = new Set()
+    let home = null
+    while (cur && !seen.has(cur)) {
+      seen.add(cur)
+      const n = byId.get(cur)
+      if (!n) break
+      if (n.kind === 'home') { home = n.id; break }
+      cur = n.parent_id
+    }
+    out.set(l.id, home)
+  }
+  return out
+}
+
 function clearObjects() {
   for (const v of locMeshes.value.values()) {
     scene.remove(v.mesh)
@@ -187,8 +210,16 @@ function rebuild() {
   clearObjects()
   const world = buildWorldMap(props.locations || [])
 
+  // Pre-compute ancestor home for each location once per rebuild.
+  const homeOf = computeHomeAncestors(props.locations || [])
+
   for (const [id, info] of world) {
     const { geo } = info
+    // Home nodes are abstract groupings — no 3D mesh, no item cubes, no light.
+    // Children (rooms) still see this home's geometry.x/z as a world offset via
+    // buildWorldMap, so siblings stay spatially separated.
+    if (info.loc.kind === 'home') continue
+    if (props.activeHomeId != null && homeOf.get(id) !== props.activeHomeId) continue
     const isRoom = info.loc.kind === 'room'
     const cy = info.y + geo.h / 2
     // Polygon rooms use an extruded shape; everything else uses a centred BoxGeometry.

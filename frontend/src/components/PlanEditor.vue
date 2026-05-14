@@ -16,10 +16,28 @@ const props = defineProps({
   locations: { type: Array, default: () => [] },
   items: { type: Array, default: () => [] },
   selectedId: { type: Number, default: null },
+  // Optional home filter. When set, only rooms/descendants belonging to this home
+  // (i.e. their ancestor chain contains this id) are rendered. null = show everything.
+  activeHomeId: { type: Number, default: null },
   // Centralised edit pipeline so undo can record every change.
   applyEdit: { type: Function, required: true },
   snapshot: { type: Function, required: true },
 })
+
+// Walk a location's parent chain looking for the first 'home' ancestor.
+function ancestorHomeId(locId) {
+  const byId = new Map(props.locations.map((l) => [l.id, l]))
+  let cur = locId
+  const seen = new Set()
+  while (cur && !seen.has(cur)) {
+    seen.add(cur)
+    const l = byId.get(cur)
+    if (!l) return null
+    if (l.kind === 'home') return l.id
+    cur = l.parent_id
+  }
+  return null
+}
 const emit = defineEmits(['changed', 'select'])
 
 const tool = ref('select')
@@ -81,6 +99,14 @@ const worldMap = computed(() => buildWorldMap(props.locations))
 const renderables = computed(() => {
   const arr = []
   for (const [id, info] of worldMap.value) {
+    // Skip home groupings — they're not drawn in the 2D plan (no footprint).
+    if (info.loc.kind === 'home') continue
+    // If a home filter is active, only render rooms (and their descendants) that
+    // belong to the selected home. Top-level rooms with no parent are always shown.
+    if (props.activeHomeId != null) {
+      const homeId = ancestorHomeId(info.loc.id)
+      if (homeId !== props.activeHomeId) continue
+    }
     const cat = catalogFor(info.loc.kind)
     arr.push({
       id, loc: info.loc, kind: info.loc.kind,
@@ -273,9 +299,11 @@ function computeSnap(movingId, x, z, w, d) {
 async function createRoom(x, z, w, d) {
   const cat = catalogFor('room')
   const geometry = { x, y: 0, z, w, h: cat.h, d, rot: 0, color: cat.color, levels: 0 }
+  // Parent new rooms to the active home (if any), so they show up under "我家"
+  // in the breadcrumb and the home filter keeps them visible.
   const loc = await props.applyEdit({
     kind: 'create',
-    payload: { name: autoName('room', null), kind: 'room', parent_id: null, geometry },
+    payload: { name: autoName('room', null), kind: 'room', parent_id: props.activeHomeId || null, geometry },
   })
   emit('changed')
   if (loc) emit('select', loc.id)
@@ -309,7 +337,7 @@ async function createPolygonRoom(worldPoints) {
   }
   const loc = await props.applyEdit({
     kind: 'create',
-    payload: { name: autoName('room', null), kind: 'room', parent_id: null, geometry },
+    payload: { name: autoName('room', null), kind: 'room', parent_id: props.activeHomeId || null, geometry },
   })
   emit('changed')
   if (loc) emit('select', loc.id)

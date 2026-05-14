@@ -71,23 +71,62 @@ def _build_csv(rows: list[list], db: Session, filename: str, *,
 
 
 def _resolve_location(db: Session, path: str) -> int | None:
+    """Walk a 'A / B / C' path, creating missing segments. Backward-compatible:
+    - Legacy paths like "客厅 / 沙发" (without a home prefix) are still accepted.
+      We resolve them by FIRST searching under the active default home, then
+      falling back to direct top-level.
+    - New paths like "我家 / 客厅 / 沙发" pass straight through.
+    - Auto-created top segments default to kind='home' so a fresh import naturally
+      builds the new hierarchy. Mid-segments default to 'room' (1st level under a
+      home) or 'box' (deeper).
+    """
     path = (path or "").strip()
     if not path:
         return None
     parts = [p.strip() for p in path.replace("／", "/").split("/") if p.strip()]
+    if not parts:
+        return None
+
+    # Detect "legacy" path: first segment matches an existing non-home top-level
+    # location. Prepend the default home so the chain stays valid post-migration.
+    first_top = (
+        db.query(models.Location)
+        .filter(models.Location.name == parts[0], models.Location.parent_id == None)  # noqa: E711
+        .first()
+    )
+    if first_top and first_top.kind != "home":
+        # No home yet — fall through, the existing behaviour creates a 'room' at top.
+        pass
+    elif not first_top:
+        # First segment doesn't exist at top. If a home exists and the SECOND-level
+        # location with this name lives under that home, treat the path as legacy.
+        any_home = db.query(models.Location).filter(models.Location.kind == "home").first()
+        if any_home:
+            under_home = (
+                db.query(models.Location)
+                .filter(models.Location.name == parts[0],
+                        models.Location.parent_id == any_home.id)
+                .first()
+            )
+            if under_home:
+                parts = [any_home.name, *parts]
+
     parent_id: int | None = None
     last_id: int | None = None
-    for name in parts:
+    for depth, name in enumerate(parts):
         loc = (
             db.query(models.Location)
             .filter(models.Location.name == name, models.Location.parent_id == parent_id)
             .first()
         )
         if not loc:
-            loc = models.Location(
-                name=name, parent_id=parent_id,
-                kind="room" if parent_id is None else "box",
-            )
+            if depth == 0:
+                kind = "home"
+            elif depth == 1:
+                kind = "room"
+            else:
+                kind = "box"
+            loc = models.Location(name=name, parent_id=parent_id, kind=kind)
             db.add(loc)
             db.flush()
         parent_id = loc.id

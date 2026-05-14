@@ -10,6 +10,11 @@
 //                     'inside' — children sit on the parent's interior bottom (y=0)
 //                     'top'    — children stack on top of the parent (y=parent.h)
 export const FURNITURE_CATALOG = [
+  // `home` is a purely-logical top-level grouping ("我家" / "老家" / "父母家"). It has
+  // no 3D mesh and no 2D footprint — its only job is to scope rooms beneath it so
+  // the user can answer "在哪个家里" before "在哪个房间里". geometry.x/z still acts
+  // as a world offset so different homes' rooms don't pile onto the same coords.
+  { kind: 'home',     label: '家',     icon: '🏡', w: 0,    h: 0,    d: 0,    color: '#0ea5e9', container: true,  isHome: true, isRoom: false, levels: 0, placement: 'inside' },
   { kind: 'room',     label: '房间',   icon: '🏠', w: 4.0,  h: 2.7,  d: 4.0,  color: '#94a3b8', container: true,  isRoom: true, levels: 0, placement: 'inside' },
   { kind: 'shelf',    label: '书架',   icon: '📚', w: 1.0,  h: 1.8,  d: 0.30, color: '#a78bfa', container: true,  levels: 4, placement: 'inside' },
   { kind: 'cabinet',  label: '柜子',   icon: '🗄', w: 1.2,  h: 2.0,  d: 0.50, color: '#7c3aed', container: true,  levels: 3, placement: 'inside' },

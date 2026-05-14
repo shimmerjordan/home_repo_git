@@ -161,9 +161,35 @@ class VoiceConfigPatch(BaseModel):
     whisper_enabled: Optional[bool] = None
 
 
+class DingTalkConfigPatch(BaseModel):
+    enabled: Optional[bool] = None
+    sign_secret: Optional[str] = None
+    allowed_users: Optional[list[str]] = None
+    outgoing_webhook: Optional[str] = None
+    outgoing_sign_secret: Optional[str] = None
+
+
+class TelegramConfigPatch(BaseModel):
+    enabled: Optional[bool] = None
+    bot_token: Optional[str] = None
+    allowed_chat_ids: Optional[list[str]] = None
+    allowed_user_ids: Optional[list[str]] = None
+
+
+class FeishuConfigPatch(BaseModel):
+    enabled: Optional[bool] = None
+    app_id: Optional[str] = None
+    app_secret: Optional[str] = None
+    allowed_chat_ids: Optional[list[str]] = None
+    allowed_open_ids: Optional[list[str]] = None
+
+
 class ConfigPatch(BaseModel):
     llm: Optional[LLMConfigPatch] = None
     voice: Optional[VoiceConfigPatch] = None
+    dingtalk: Optional[DingTalkConfigPatch] = None
+    telegram: Optional[TelegramConfigPatch] = None
+    feishu: Optional[FeishuConfigPatch] = None
 
 
 # --- Audit log ---

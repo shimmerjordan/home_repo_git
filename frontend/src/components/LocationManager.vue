@@ -72,6 +72,7 @@ function descendantCount(locId) {
 }
 
 const KIND_OPTIONS = [
+  { value: 'home',     label: '🏡 家 (顶层)' },
   { value: 'room',     label: '🏠 房间' },
   { value: 'shelf',    label: '📚 书架' },
   { value: 'cabinet',  label: '🗄 柜子' },

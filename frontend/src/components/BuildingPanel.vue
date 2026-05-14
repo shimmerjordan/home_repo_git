@@ -77,6 +77,65 @@ if (typeof window !== 'undefined') {
 
 const history = useEditHistory()
 
+// ---- Multi-home support ----
+// Homes are top-level Location records with kind='home' (logical groupings; no 3D
+// mesh). The 'activeHomeId' filter scopes both 2D & 3D viewers to one home so e.g.
+// "我家" rooms aren't visually mixed with "老家" rooms. Persisted so reopening the
+// tab returns to the same home.
+const HOME_KEY = 'storage.activeHomeId'
+const activeHomeId = ref(null)
+try {
+  const raw = localStorage.getItem(HOME_KEY)
+  if (raw && raw !== 'null') activeHomeId.value = +raw || null
+} catch {}
+watch(activeHomeId, (v) => { try { localStorage.setItem(HOME_KEY, v == null ? 'null' : String(v)) } catch {} })
+
+const homes = computed(() => locations.value.filter((l) => l.kind === 'home'))
+// When the user has homes but no active selection, pick the first one automatically.
+watch([homes, activeHomeId], ([hs, cur]) => {
+  if (hs.length && (cur == null || !hs.find((h) => h.id === cur))) {
+    activeHomeId.value = hs[0].id
+  }
+  if (!hs.length && cur != null) activeHomeId.value = null
+}, { immediate: true })
+
+async function createHome() {
+  const name = prompt('新的"家"叫什么名字?(例: 我家 / 老家 / 父母家)', homes.value.length ? '老家' : '我家')
+  if (!name?.trim()) return
+  const wasFirst = homes.value.length === 0
+  // Stagger world coords for new homes so children rooms don't pile on (0,0,0).
+  const offset = homes.value.length * 20
+  const created = await applyEdit({
+    kind: 'create',
+    payload: { name: name.trim(), kind: 'home', parent_id: null, geometry: { x: offset, z: 0, w: 0, h: 0, d: 0, color: '#0ea5e9' } },
+  })
+  await load()
+  const newHome = created?.id
+    ? locations.value.find((l) => l.id === created.id)
+    : locations.value.find((l) => l.kind === 'home' && l.name === name.trim())
+  if (newHome) activeHomeId.value = newHome.id
+
+  // First home: offer to move existing root-level rooms (legacy data with no
+  // home ancestor) under it — otherwise the new home filter would hide them.
+  if (wasFirst && newHome) {
+    const orphans = locations.value.filter((l) => l.kind === 'room' && !l.parent_id)
+    if (orphans.length && confirm(`把现有的 ${orphans.length} 个房间都放到「${newHome.name}」下吗?`)) {
+      for (const r of orphans) {
+        await applyEdit({ kind: 'update', id: r.id, patch: { parent_id: newHome.id }, before: history.snapshot(r) })
+      }
+      await load()
+    }
+  }
+}
+
+async function renameActiveHome() {
+  const cur = homes.value.find((h) => h.id === activeHomeId.value)
+  if (!cur) return
+  const name = prompt('重命名当前家:', cur.name)
+  if (!name?.trim() || name === cur.name) return
+  await applyEdit({ kind: 'update', id: cur.id, patch: { name: name.trim() }, before: history.snapshot(cur) })
+}
+
 async function load() {
   const [locs, its] = await Promise.all([api.listLocations(), api.listItems({ limit: 1000 })])
   locations.value = locs
@@ -266,7 +325,18 @@ function selectFromTree(id) {
   <div class="space-y-2">
     <!-- Top bar -->
     <div class="card p-2 flex flex-wrap gap-2 items-center">
-      <input v-model="search" class="input flex-1 min-w-[180px]" placeholder="🔎 搜索物品或位置" />
+      <!-- Home selector: scopes the 2D/3D viewer to one home. "+" creates a new
+           one (我家 / 老家 / 父母家). "✎" renames the current home. -->
+      <div class="flex items-center gap-1">
+        <span class="text-xs text-slate-500">🏡</span>
+        <select v-if="homes.length" v-model="activeHomeId" class="input text-sm py-1 min-w-[7rem]">
+          <option v-for="h in homes" :key="h.id" :value="h.id">{{ h.name }}</option>
+        </select>
+        <span v-else class="text-xs text-slate-400 italic">(还没有家)</span>
+        <button class="btn btn-secondary text-xs" @click="createHome" title="新建一个家(如:老家、父母家)">+</button>
+        <button v-if="activeHomeId" class="btn btn-secondary text-xs" @click="renameActiveHome" title="重命名当前家">✎</button>
+      </div>
+      <input v-model="search" class="input flex-1 min-w-[160px]" placeholder="🔎 搜索物品或位置" />
       <div class="flex gap-1">
         <button class="btn btn-secondary text-xs" :disabled="!history.canUndo()"
                 :title="history.canUndo() ? '撤销: ' + history.undoLabel() : '无可撤销操作'"
@@ -311,6 +381,7 @@ function selectFromTree(id) {
       ]">
       <PlanEditor v-show="viewMode === '2d' || viewMode === 'split'"
                   :locations="locations" :items="items" :selected-id="selectedId"
+                  :active-home-id="activeHomeId"
                   :apply-edit="applyEdit" :snapshot="history.snapshot"
                   @select="selectedId = $event" @changed="load" />
       <div v-show="viewMode === '3d' || viewMode === 'split'" class="card p-2">
@@ -325,6 +396,7 @@ function selectFromTree(id) {
                  :selectable="true" :editable="true"
                  :low-quality="lowQuality"
                  :show-items-in-room-ids="shownItemRoomIds"
+                 :active-home-id="activeHomeId"
                  :height="viewMode === '3d' ? 'clamp(360px, 62vh, 720px)' : 'clamp(320px, 56vh, 640px)'"
                  @select-location="selectedId = $event"
                  @select-item="(id) => { highlightItemId = null; setTimeout(() => highlightItemId = id, 30) }"

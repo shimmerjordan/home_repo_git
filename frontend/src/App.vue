@@ -1,5 +1,5 @@
 <script setup>
-import { ref, onMounted, onBeforeUnmount } from 'vue'
+import { ref, watch, onMounted, onBeforeUnmount } from 'vue'
 import VoicePanel from './components/VoicePanel.vue'
 import ItemList from './components/ItemList.vue'
 import LocationManager from './components/LocationManager.vue'
@@ -10,7 +10,30 @@ import BuildingPanel from './components/BuildingPanel.vue'
 import AuditPanel from './components/AuditPanel.vue'
 import { api } from './api'
 
-const tab = ref('voice')
+// Tab state lives in the URL hash (#tab=items) so refreshing the page or sharing
+// a link keeps the user on the same view. Hash routing is enough — no full router
+// needed and it works behind nginx without any rewrite rules.
+const VALID_TABS = ['voice', 'items', 'locations', 'building', 'log', 'audit', 'logs', 'settings']
+function _tabFromHash() {
+  if (typeof window === 'undefined') return 'voice'
+  const m = window.location.hash.match(/tab=([\w-]+)/)
+  const t = m && m[1]
+  return VALID_TABS.includes(t) ? t : 'voice'
+}
+const tab = ref(_tabFromHash())
+function _writeHash(t) {
+  if (typeof window === 'undefined') return
+  const next = `#tab=${t}`
+  if (window.location.hash !== next) {
+    // Use replaceState so we don't pollute the history stack with every tab click;
+    // refresh still lands on the same tab.
+    history.replaceState(null, '', next)
+  }
+}
+watch(tab, _writeHash, { immediate: true })
+if (typeof window !== 'undefined') {
+  window.addEventListener('hashchange', () => { tab.value = _tabFromHash() })
+}
 const refreshKey = ref(0)
 const settings = ref(null)
 
