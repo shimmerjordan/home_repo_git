@@ -19,6 +19,18 @@ from .services.logbuffer import app_log, install as install_logbuffer
 install_logbuffer()
 logging.basicConfig(level=logging.INFO)
 
+# Silence verbose 3rd-party loggers BEFORE any module imports them. Otherwise the
+# logbuffer fills with thousands of WS/HTTP DEBUG lines per minute, which slows
+# every /api/logs request and starves the API event loop.
+for _name in ("websockets", "websockets.client", "websockets.protocol",
+              "urllib3", "urllib3.connectionpool",
+              "lark_oapi", "lark_oapi.ws", "lark_oapi.ws.client",
+              "httpx", "httpcore"):
+    try:
+        logging.getLogger(_name).setLevel(logging.WARNING)
+    except Exception:
+        pass
+
 from . import models  # noqa: F401  (ensure tables registered)
 from sqlalchemy import text as _sql_text
 

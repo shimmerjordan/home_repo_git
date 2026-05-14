@@ -19,6 +19,7 @@ import json
 import logging
 import re
 import threading
+import time
 from typing import Any
 
 from ..config import store
@@ -29,6 +30,18 @@ from ..services.logbuffer import app_log
 
 log = logging.getLogger("storage.feishu")
 
+# Silence noisy 3rd-party DEBUG loggers — the lark WS handshake + websockets
+# frame logs flood the app-log ring buffer and slow every API request when the
+# logs panel is open. We keep WARNING+ from those libraries.
+for _name in ("websockets", "websockets.client", "websockets.protocol",
+              "urllib3", "urllib3.connectionpool",
+              "lark_oapi", "lark_oapi.ws", "lark_oapi.ws.client",
+              "lark", "lark.ws"):
+    try:
+        logging.getLogger(_name).setLevel(logging.WARNING)
+    except Exception:
+        pass
+
 # Module state ---------------------------------------------------------------
 _supervisor_task: asyncio.Task | None = None
 _ws_thread: threading.Thread | None = None
@@ -37,6 +50,8 @@ _api_client: Any = None
 _main_loop: asyncio.AbstractEventLoop | None = None
 _running_app_id: str = ""   # the app_id the current WS connection was opened with
 _running_app_secret: str = ""
+_last_thread_start: float = 0.0   # monotonic seconds; gates the reconnect backoff
+_consecutive_failures: int = 0    # bumps on crash, reset on long-lived connection
 
 
 def _try_import():
@@ -104,7 +119,14 @@ async def _run_intent(text: str, cfg) -> str:
 # ---- Event handler (runs on lark's thread) ---------------------------------
 
 def _handle_message_event(data) -> None:
-    """Called from the lark-oapi WebSocket thread with a P2ImMessageReceiveV1."""
+    """Called from the lark-oapi WebSocket thread with a P2ImMessageReceiveV1.
+
+    Must return FAST. lark runs its WebSocket ping/pong on the same thread, and
+    any blocking work here will eventually trigger a ping_timeout (~30s) and
+    force a reconnect — which hits feishu's per-app rate limit if it happens
+    several times in a row. So: extract + filter here, fire-and-forget the
+    LLM + reply work onto the main FastAPI event loop, return immediately.
+    """
     if _main_loop is None:
         return
     try:
@@ -140,40 +162,72 @@ def _handle_message_event(data) -> None:
 
         app_log.info("feishu from=%s chat=%s text=%r", sender_id, chat_id, text[:120])
 
-        # Hop to the FastAPI event loop to use async parse_intent.
-        fut = asyncio.run_coroutine_threadsafe(_run_intent(text, cfg), _main_loop)
-        try:
-            reply = fut.result(timeout=90)
-        except Exception as exc:
-            reply = f"AI 出错了: {exc}"
-        _send_text(chat_id, "chat_id", reply)
+        # FIRE-AND-FORGET: schedule the LLM + reply work on the main loop and
+        # return so the WS thread can keep the heartbeat going.
+        asyncio.run_coroutine_threadsafe(_handle_async(text, chat_id, cfg), _main_loop)
     except Exception as exc:
         log.exception("feishu handle: %s", exc)
+
+
+async def _handle_async(text: str, chat_id: str, cfg) -> None:
+    """Runs on the FastAPI main loop. Does the LLM call, then sends the reply
+    via the lark SDK in an executor thread (the SDK is sync)."""
+    try:
+        reply = await _run_intent(text, cfg)
+    except Exception as exc:
+        log.exception("feishu intent: %s", exc)
+        reply = f"AI 出错了: {exc}"
+    try:
+        # _send_text is sync (lark SDK) — run in executor so we don't block the loop.
+        await asyncio.get_event_loop().run_in_executor(
+            None, _send_text, chat_id, "chat_id", reply,
+        )
+    except Exception as exc:
+        log.warning("feishu send_text failed: %s", exc)
 
 
 # ---- WS thread lifecycle ---------------------------------------------------
 
 def _run_ws_client(app_id: str, app_secret: str) -> None:
-    """Body of the WS thread — blocks on lark's client.start()."""
-    global _ws_client, _api_client
-    import lark_oapi as lark
-    _api_client = (lark.Client.builder()
-                   .app_id(app_id).app_secret(app_secret)
-                   .log_level(lark.LogLevel.WARNING)
-                   .build())
-    event_handler = (lark.EventDispatcherHandler.builder("", "")
-                     .register_p2_im_message_receive_v1(_handle_message_event)
-                     .build())
-    _ws_client = lark.ws.Client(app_id, app_secret,
-                                event_handler=event_handler,
-                                log_level=lark.LogLevel.WARNING)
-    app_log.info("feishu WS connecting (app=%s)", app_id)
+    """Body of the WS thread — blocks on lark's client.start().
+
+    CRITICAL: lark's WebSocket client calls `asyncio.get_event_loop()` and then
+    `loop.run_until_complete()`. Without an explicit per-thread event loop,
+    Python falls back to creating a new one OR (worse) inheriting state across
+    restarts that leaves a stale loop in a "running" state. We give the thread
+    its own fresh event loop here — that's what fixes "this event loop is
+    already running" on the second connect attempt.
+    """
+    global _ws_client, _api_client, _consecutive_failures
+    new_loop = asyncio.new_event_loop()
+    asyncio.set_event_loop(new_loop)
+    started_at = time.monotonic()
     try:
+        import lark_oapi as lark
+        _api_client = (lark.Client.builder()
+                       .app_id(app_id).app_secret(app_secret)
+                       .log_level(lark.LogLevel.WARNING)
+                       .build())
+        event_handler = (lark.EventDispatcherHandler.builder("", "")
+                         .register_p2_im_message_receive_v1(_handle_message_event)
+                         .build())
+        _ws_client = lark.ws.Client(app_id, app_secret,
+                                    event_handler=event_handler,
+                                    log_level=lark.LogLevel.WARNING)
+        app_log.info("feishu WS connecting (app=%s)", app_id)
         _ws_client.start()
     except Exception as exc:
         log.exception("feishu WS crashed: %s", exc)
     finally:
-        app_log.info("feishu WS stopped")
+        # If we held the connection more than 5 min, treat as success: reset the
+        # failure counter so the supervisor's backoff doesn't keep growing.
+        if time.monotonic() - started_at > 300:
+            _consecutive_failures = 0
+        app_log.info("feishu WS stopped (uptime=%.0fs)", time.monotonic() - started_at)
+        try:
+            new_loop.close()
+        except Exception:
+            pass
 
 
 def _stop_ws() -> None:
@@ -197,9 +251,20 @@ def _stop_ws() -> None:
 
 
 async def _supervisor() -> None:
-    """Polls config every few seconds. Starts the WS thread when feishu.enabled
-    becomes true and the credentials change; stops when disabled."""
+    """Manages the WS thread.
+
+    Rules:
+      - Only ONE thread alive at a time.
+      - Exponential backoff after crashes: 30s, 60s, 120s, 300s (cap). Feishu
+        rate-limits at 5 conns per app per minute, and aggressive restarts will
+        hit "the number of connections exceeded the limit" for a long time.
+      - Credentials change => stop the old thread then wait a full minute
+        before opening a new one (gives feishu's conn counter time to decay).
+      - When disabled, just stop tracking; the daemon thread will be reaped
+        on its own (lark's start() exits on connection close).
+    """
     global _ws_thread, _running_app_id, _running_app_secret
+    global _last_thread_start, _consecutive_failures
     while True:
         try:
             cfg = store.get()
@@ -208,28 +273,45 @@ async def _supervisor() -> None:
             want = bool(fs.enabled and fs.app_id and fs.app_secret)
             creds_changed = (fs.app_id != _running_app_id or fs.app_secret != _running_app_secret)
 
-            if want and (not running or creds_changed):
+            if not want:
+                if running:
+                    _stop_ws()
+                    app_log.info("feishu: disabled — letting WS thread die")
+                _running_app_id = ""
+                _running_app_secret = ""
+                _consecutive_failures = 0
+            elif running and not creds_changed:
+                pass  # all good — lark's internal reconnect is handling things
+            else:
+                # Need to (re)start. Apply backoff to avoid the rate-limit cascade.
+                backoff = min(300, 30 * (2 ** _consecutive_failures))
+                elapsed = time.monotonic() - _last_thread_start
+                if elapsed < backoff:
+                    # Quiet sleep — don't log every 5s.
+                    await asyncio.sleep(min(10, backoff - elapsed))
+                    continue
                 if running and creds_changed:
                     _stop_ws()
-                    await asyncio.sleep(1)
+                    await asyncio.sleep(2)
                 if not _try_import():
-                    app_log.warning("feishu: lark-oapi 未安装, 跳过 (pip install lark-oapi)")
-                    await asyncio.sleep(30)
+                    app_log.warning("feishu: lark-oapi 未安装, pip install lark-oapi")
+                    await asyncio.sleep(60)
                     continue
                 _running_app_id = fs.app_id
                 _running_app_secret = fs.app_secret
+                _last_thread_start = time.monotonic()
+                _consecutive_failures += 1
+                if _consecutive_failures > 1:
+                    app_log.warning("feishu: 第 %d 次尝试连接 (上一次失败)", _consecutive_failures)
                 _ws_thread = threading.Thread(
                     target=_run_ws_client, args=(fs.app_id, fs.app_secret),
                     daemon=True, name="feishu-ws",
                 )
                 _ws_thread.start()
-            elif not want and running:
-                _stop_ws()
-                _running_app_id = ""
-                _running_app_secret = ""
         except Exception as exc:
             log.exception("feishu supervisor: %s", exc)
-        await asyncio.sleep(5)
+        # 15s poll cadence — gives lark room to settle without spamming.
+        await asyncio.sleep(15)
 
 
 # ---- Public API ------------------------------------------------------------
@@ -244,10 +326,11 @@ def start() -> None:
 
 
 def reload() -> None:
-    """Settings router calls this on every PATCH. The supervisor polls every 5s
-    so it picks up changes automatically; this is a no-op kept for symmetry
-    with telegram.reload()."""
-    return None
+    """Settings router calls this on every PATCH. Reset the failure counter so
+    a deliberate config change isn't blocked by the previous backoff window."""
+    global _consecutive_failures, _last_thread_start
+    _consecutive_failures = 0
+    _last_thread_start = 0.0
 
 
 def stop() -> None:
