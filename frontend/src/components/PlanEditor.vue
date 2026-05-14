@@ -25,6 +25,22 @@ const emit = defineEmits(['changed', 'select'])
 const tool = ref('select')
 const drag = ref(null)
 const mouse = ref({ x: 0, z: 0 })
+// Furniture dropdown — opens a grid of all kinds on click instead of the previous
+// long horizontal-scroll button strip (which was hard to use on desktop because
+// the scroll affordance wasn't obvious and pieces were tiny).
+const furnitureOpen = ref(false)
+function closeFurniture(ev) {
+  if (!furnitureOpen.value) return
+  const root = document.getElementById('furniture-dropdown-root')
+  if (root && !root.contains(ev.target)) furnitureOpen.value = false
+}
+onMounted(() => { document.addEventListener('pointerdown', closeFurniture, true) })
+onBeforeUnmount(() => { document.removeEventListener('pointerdown', closeFurniture, true) })
+function pickFurniture(kind) {
+  tool.value = kind
+  furnitureOpen.value = false
+}
+const currentFurniture = computed(() => FURNITURE_CATALOG.find((c) => c.kind === tool.value) || null)
 const svgRef = ref(null)
 const vb = ref({ x: -10, z: -10, w: 20, d: 20 })
 const snapGuides = ref([])
@@ -546,15 +562,21 @@ function onPointerDown(ev) {
   // to background-pan. Tap on a shape simply selects it (so users can still
   // inspect things). Wheel zoom is always allowed (separate handler).
   if (locked.value) {
+    let justSelected = false
     if (role === 'shape' && locId && tool.value === 'select') {
       emit('select', locId)
-      // Fall through to start a pan gesture so the user can grab + drag.
+      justSelected = true
+      // Fall through to start a pan gesture so the user can still grab + drag.
     }
     drag.value = {
       type: 'pan',
       vbX: vb.value.x, vbZ: vb.value.z,
       startClientX: ev.clientX, startClientY: ev.clientY,
       moved: 0,
+      // Block the "tap-empty = deselect" branch in onPointerUp: in lock mode a tap
+      // on a shape just selected it, and releasing without moving should KEEP that
+      // selection so the property panel stays open for inspection.
+      keepSelection: justSelected,
     }
     svgRef.value.setPointerCapture?.(ev.pointerId)
     return
@@ -750,7 +772,7 @@ async function onPointerUp(ev) {
   try { svgRef.value?.releasePointerCapture?.(ev.pointerId) } catch {}
   if (!d) return
   if (d.type === 'pan') {
-    if (d.moved < 4) emit('select', null)  // tap without drag = deselect
+    if (d.moved < 4 && !d.keepSelection) emit('select', null)  // tap without drag = deselect
     return
   }
   if (d.type === 'create-room') {
@@ -873,8 +895,10 @@ const ghost = computed(() => {
 
 <template>
   <div class="flex flex-col gap-2">
-    <!-- Toolbar: horizontal scroll, compact icons (labels hidden on narrow screens) -->
-    <div class="card p-1.5 flex items-center gap-1 overflow-x-auto no-scrollbar" style="touch-action: pan-x">
+    <!-- Toolbar: flex-wrap so the dropdown's expansion isn't clipped by overflow.
+         (We used to use overflow-x: auto for a long button strip; the furniture
+         dropdown now collapses that into one button, so wrap is enough.) -->
+    <div class="card p-1.5 flex items-center gap-1 flex-wrap relative">
       <button :class="['btn text-xs flex-shrink-0',
                        locked ? 'bg-amber-100 text-amber-800 border border-amber-300' : 'btn-secondary']"
               :title="locked ? '当前已锁定 — 仅支持平移和缩放。点击解锁' : '锁定视图 — 防止误拖动'"
@@ -891,13 +915,33 @@ const ghost = computed(() => {
               title="多边形房间: 点击逐个加顶点, 点回起点 / 按 Enter 闭合"
               @click="tool='room-poly'; polyPoints = []">🔷<span class="hidden md:inline ml-1">多边形</span></button>
       <span class="w-px h-6 bg-slate-200 mx-0.5 flex-shrink-0"></span>
-      <button v-for="c in FURNITURE_CATALOG" :key="c.kind"
-              :class="['btn text-xs flex-shrink-0', tool===c.kind ? 'btn-primary' : 'btn-secondary']"
-              :disabled="locked"
-              :title="`${c.label} (${c.w}×${c.d}m${c.levels >= 2 ? `, ${c.levels}层` : ''})`"
-              @click="tool = c.kind">
-        <span class="text-base leading-none">{{ c.icon }}</span><span class="hidden md:inline ml-1">{{ c.label }}</span>
-      </button>
+      <!-- Furniture dropdown — single button shows the active kind (or a default icon),
+           clicking it opens a 4-column grid of all kinds with labels visible. -->
+      <div id="furniture-dropdown-root" class="relative flex-shrink-0">
+        <button :class="['btn text-xs',
+                         currentFurniture ? 'btn-primary' : 'btn-secondary']"
+                :disabled="locked"
+                :title="currentFurniture ? `当前: ${currentFurniture.label} — 点击换其他家具` : '选择家具类型'"
+                @click="furnitureOpen = !furnitureOpen">
+          <span class="text-base leading-none">{{ currentFurniture?.icon || '🛋' }}</span>
+          <span class="ml-1">{{ currentFurniture?.label || '家具' }}</span>
+          <span class="ml-1 opacity-60">▾</span>
+        </button>
+        <div v-if="furnitureOpen"
+             class="absolute left-0 top-full mt-1 z-30 bg-white rounded-lg shadow-xl border border-slate-200 p-2 w-[min(20rem,80vw)]">
+          <div class="text-xs text-slate-500 mb-1.5 px-1">点击选择家具,然后到房间里点击放置</div>
+          <div class="grid grid-cols-4 gap-1">
+            <button v-for="c in FURNITURE_CATALOG" :key="c.kind"
+                    :class="['flex flex-col items-center justify-center gap-0.5 p-1.5 rounded text-xs',
+                             tool===c.kind ? 'bg-slate-900 text-white' : 'hover:bg-slate-100']"
+                    :title="`${c.label} · 默认 ${c.w}×${c.d}m${c.levels >= 2 ? `, ${c.levels}层` : ''}`"
+                    @click="pickFurniture(c.kind)">
+              <span class="text-2xl leading-none">{{ c.icon }}</span>
+              <span class="text-[11px] leading-tight">{{ c.label }}</span>
+            </button>
+          </div>
+        </div>
+      </div>
       <span class="flex-1 min-w-2"></span>
       <button class="btn btn-secondary text-xs flex-shrink-0" @click="fitAll" title="重置视野">⤢</button>
       <button class="btn btn-danger text-xs flex-shrink-0" :disabled="locked || !selectedId" @click="deleteSelected" title="删除选中">🗑</button>
