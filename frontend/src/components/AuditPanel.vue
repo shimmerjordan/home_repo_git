@@ -46,13 +46,14 @@ function toggle(id) {
 function fmt(d) { return new Date(d).toLocaleString('zh-CN', { hour12: false }) }
 
 const ENTITY_LABEL = { location: '位置', item: '物品', transaction: '流水' }
-const ACTION_LABEL = { create: '新建', update: '修改', delete: '删除', restore: '撤销', take_out: '取出', put_in: '存入', adjust: '盘点' }
+const ACTION_LABEL = { create: '新建', update: '修改', delete: '删除', restore: '撤销', take_out: '借出', put_in: '归位', consume: '用完', adjust: '盘点' }
 const ACTION_CLASS = {
   create: 'bg-emerald-100 text-emerald-700',
   update: 'bg-blue-100 text-blue-700',
   delete: 'bg-rose-100 text-rose-700',
   take_out: 'bg-amber-100 text-amber-700',
   put_in: 'bg-emerald-100 text-emerald-700',
+  consume: 'bg-rose-100 text-rose-700',
   adjust: 'bg-slate-100 text-slate-700',
   restore: 'bg-violet-100 text-violet-700',
 }

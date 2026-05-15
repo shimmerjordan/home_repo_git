@@ -37,15 +37,16 @@ function clearFilters() {
 }
 
 function fmt(d) { return new Date(d).toLocaleString('zh-CN', { hour12: false }) }
-const labels = { take_out: '取出', put_in: '存入', adjust: '盘点' }
+const labels = { take_out: '借出', put_in: '归位', consume: '用完', adjust: '盘点' }
 const palette = {
-  take_out: 'bg-rose-100 text-rose-700',
+  take_out: 'bg-amber-100 text-amber-800',
   put_in: 'bg-emerald-100 text-emerald-700',
+  consume: 'bg-rose-100 text-rose-700',
   adjust: 'bg-blue-100 text-blue-700',
 }
 
 const summary = computed(() => {
-  const out = { take_out: 0, put_in: 0, adjust: 0 }
+  const out = { take_out: 0, put_in: 0, consume: 0, adjust: 0 }
   for (const t of txs.value) out[t.action] = (out[t.action] || 0) + (t.quantity || 0)
   return out
 })
@@ -74,8 +75,9 @@ function exportCsv() {
       <input v-model="filters.q" class="input col-span-2" placeholder="🔎 物品名" />
       <select v-model="filters.action" class="input">
         <option value="">全部动作</option>
-        <option value="take_out">取出</option>
-        <option value="put_in">存入</option>
+        <option value="take_out">借出</option>
+        <option value="put_in">归位</option>
+        <option value="consume">用完</option>
         <option value="adjust">盘点</option>
       </select>
       <select v-model="filters.location_id" class="input">
@@ -89,8 +91,9 @@ function exportCsv() {
     <div class="card p-3 flex items-center justify-between text-sm">
       <div class="flex gap-3 flex-wrap">
         <span>共 <b>{{ txs.length }}</b> 条</span>
-        <span>取出: <b class="text-rose-600">{{ summary.take_out }}</b></span>
-        <span>存入: <b class="text-emerald-600">{{ summary.put_in }}</b></span>
+        <span>借出: <b class="text-amber-700">{{ summary.take_out }}</b></span>
+        <span>归位: <b class="text-emerald-600">{{ summary.put_in }}</b></span>
+        <span v-if="summary.consume">用完: <b class="text-rose-600">{{ summary.consume }}</b></span>
         <span v-if="summary.adjust">盘点: <b class="text-blue-600">{{ summary.adjust }}</b></span>
         <span v-if="loading" class="text-slate-400">加载中…</span>
       </div>

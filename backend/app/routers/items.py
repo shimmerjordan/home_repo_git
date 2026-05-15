@@ -376,7 +376,7 @@ recent_router = APIRouter(prefix="/api/transactions", tags=["transactions"])
 def recent_transactions(
     limit: int = Query(50, ge=1, le=2000),
     q: str | None = Query(None, description="按物品名搜索"),
-    action: str | None = Query(None, pattern="^(take_out|put_in|adjust)$"),
+    action: str | None = Query(None, pattern="^(take_out|put_in|adjust|consume)$"),
     location_id: int | None = Query(None),
     item_id: int | None = Query(None),
     since: str | None = Query(None, description="ISO 时间, 含此时刻之后"),
@@ -409,3 +409,54 @@ def recent_transactions(
             pass
     rows = query.order_by(models.Transaction.created_at.desc()).limit(limit).all()
     return [serialize_transaction(r) for r in rows]
+
+
+@recent_router.get("/pending-returns")
+def pending_returns(db: Session = Depends(get_db)):
+    """List items currently checked out and awaiting return (借出未归位).
+
+    Definition: per-item, sum(take_out qty) - sum(put_in qty) - sum(consume qty)
+    > 0. We compute this by walking ALL transactions in chronological order and
+    keeping a running balance; the per-item residual is the pending-return qty.
+    For each item we also surface the LAST take_out so the UI can show how long
+    it's been out.
+    """
+    pending: dict[int, dict] = {}
+    rows = (
+        db.query(models.Transaction)
+        .order_by(models.Transaction.created_at.asc())
+        .all()
+    )
+    for tx in rows:
+        slot = pending.setdefault(tx.item_id, {"qty": 0, "last_take": None, "last_take_loc": None})
+        if tx.action == "take_out":
+            slot["qty"] += tx.quantity
+            slot["last_take"] = tx.created_at
+            slot["last_take_loc"] = tx.location_id
+        elif tx.action in ("put_in", "consume"):
+            slot["qty"] = max(0, slot["qty"] - tx.quantity)
+            if slot["qty"] == 0:
+                slot["last_take"] = None
+                slot["last_take_loc"] = None
+        # adjust: ignored — it's a manual recount, not borrow/return
+    out = []
+    for item_id, slot in pending.items():
+        if slot["qty"] <= 0:
+            continue
+        item = db.query(models.Item).get(item_id)
+        if not item:
+            continue
+        # location to RETURN to (where it was when taken out).
+        ret_loc = None
+        if slot["last_take_loc"]:
+            ret_loc = db.query(models.Location).get(slot["last_take_loc"])
+        out.append({
+            "item_id": item.id,
+            "item_name": item.name,
+            "pending_quantity": slot["qty"],
+            "last_take_at": slot["last_take"].isoformat() if slot["last_take"] else None,
+            "return_location_id": ret_loc.id if ret_loc else None,
+            "return_location_path": location_path(ret_loc) if ret_loc else None,
+        })
+    out.sort(key=lambda r: r["last_take_at"] or "", reverse=True)
+    return out

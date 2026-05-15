@@ -123,8 +123,58 @@ async function loadScene() {
   } catch {}
 }
 
-onMounted(() => { loadRecent(); loadScene() })
-watch(() => props.refreshKey, () => { loadRecent(); loadScene() })
+// "借出未归位" items — populated from /api/transactions/pending-returns.
+const pendingReturns = ref([])
+async function loadPending() {
+  try { pendingReturns.value = await api.pendingReturns() } catch {}
+}
+
+// "已归位" — record a put_in transaction that nets against the open take_out,
+// then refresh the pending list.
+async function markReturned(p) {
+  try {
+    await api.recordTx(p.item_id, {
+      item_id: p.item_id,
+      action: 'put_in',
+      quantity: p.pending_quantity,
+      location_id: p.return_location_id || null,
+      note: '手动标记已归位',
+    })
+    await loadPending()
+    emit('changed')
+  } catch (e) { console.warn('mark returned failed', e) }
+}
+
+// "用完了" — record consume against the pending take_out so it doesn't
+// linger on the reminder list. Inventory was already decremented when taken
+// out, so we just clear the obligation without changing quantity.
+async function markConsumed(p) {
+  try {
+    await api.recordTx(p.item_id, {
+      item_id: p.item_id,
+      action: 'consume',
+      quantity: p.pending_quantity,
+      note: '手动标记用完',
+    })
+    await loadPending()
+    emit('changed')
+  } catch (e) { console.warn('mark consumed failed', e) }
+}
+
+function timeAgo(iso) {
+  if (!iso) return ''
+  const ms = Date.now() - new Date(iso).getTime()
+  const min = Math.floor(ms / 60000)
+  if (min < 1) return '刚刚'
+  if (min < 60) return `${min} 分钟前`
+  const hr = Math.floor(min / 60)
+  if (hr < 24) return `${hr} 小时前`
+  const d = Math.floor(hr / 24)
+  return `${d} 天前`
+}
+
+onMounted(() => { loadRecent(); loadScene(); loadPending() })
+watch(() => props.refreshKey, () => { loadRecent(); loadScene(); loadPending() })
 
 // When the user explicitly picks a candidate via "选这个", we must NOT let the
 // auto-multi-highlight logic re-light all same-name items — the watcher would
@@ -498,7 +548,7 @@ const phaseColor = computed(() => ({
   speaking: 'bg-cyan-400',
 }[phase.value]))
 
-const intentLabel = { find: '查找', take_out: '取出', put_in: '存入', list: '列表', create_item: '新增', assist: '推荐', unknown: '未知' }
+const intentLabel = { find: '查找', take_out: '借出', put_in: '归位', consume: '用完', list: '列表', create_item: '新增', assist: '推荐', unknown: '未知' }
 
 function candidateNameOf(id) {
   const c = (result.value?.candidates || []).find((x) => x.item_id === id)
@@ -515,7 +565,13 @@ function candidateLocOf(id) {
 function labelOf(i) { return intentLabel[i] || i || '操作' }
 function fmt(d) { return new Date(d).toLocaleTimeString('zh-CN', { hour12: false }) }
 function fmtFull(d) { return new Date(d).toLocaleString('zh-CN', { hour12: false }) }
-const txLabel = { take_out: '取出', put_in: '存入', adjust: '盘点' }
+const txLabel = { take_out: '借出', put_in: '归位', consume: '用完', adjust: '盘点' }
+const txClass = {
+  take_out: 'bg-amber-100 text-amber-800',
+  put_in:   'bg-emerald-100 text-emerald-700',
+  consume:  'bg-rose-100 text-rose-700',
+  adjust:   'bg-slate-100 text-slate-700',
+}
 
 const inConfirm = computed(() => phase.value === 'confirm-text' || phase.value === 'confirm-action')
 </script>
@@ -726,6 +782,32 @@ const inConfirm = computed(() => phase.value === 'confirm-text' || phase.value =
       </div>
     </div>
 
+    <!-- Pending returns (借出未归位) — surfaced prominently above the recent
+         transactions because it's an actionable reminder, not a passive log. -->
+    <div v-if="pendingReturns.length" class="card p-4 border-amber-300 border-2 bg-amber-50">
+      <div class="flex items-center justify-between mb-2">
+        <div class="font-semibold flex items-center gap-2">
+          <span>🔔 待归位</span>
+          <span class="tag bg-amber-200 text-amber-900">{{ pendingReturns.length }}</span>
+        </div>
+        <button class="text-xs text-slate-500 hover:text-slate-800" @click="loadPending">↻</button>
+      </div>
+      <div class="text-xs text-slate-600 mb-2">
+        以下物品已借出但未记录归位。如果其实已经用完/扔了, 点"已用完";如果放回去了, 点"已归位"。
+      </div>
+      <ul class="divide-y divide-amber-200">
+        <li v-for="p in pendingReturns" :key="p.item_id" class="py-2 flex items-center gap-2 text-sm flex-wrap">
+          <span class="font-medium">{{ p.item_name }}</span>
+          <span class="font-mono text-slate-600">×{{ p.pending_quantity }}</span>
+          <span class="text-xs text-slate-500 truncate flex-1 min-w-0">
+            {{ p.return_location_path || '原位置' }} · {{ timeAgo(p.last_take_at) }}
+          </span>
+          <button class="btn btn-secondary text-xs" @click="markReturned(p)" title="已经放回原位置">✓ 已归位</button>
+          <button class="btn btn-secondary text-xs" @click="markConsumed(p)" title="已经用完了/扔了/送人了, 不会再归位">⊗ 已用完</button>
+        </li>
+      </ul>
+    </div>
+
     <!-- Recent transactions -->
     <div class="card p-4">
       <div class="flex items-center justify-between mb-2">
@@ -735,7 +817,7 @@ const inConfirm = computed(() => phase.value === 'confirm-text' || phase.value =
       <div v-if="!recentTx.length" class="text-sm text-slate-400 py-4 text-center">暂无</div>
       <ul v-else class="divide-y divide-slate-100">
         <li v-for="t in recentTx" :key="t.id" class="py-2 flex items-center gap-3 text-sm">
-          <span :class="['tag', t.action === 'take_out' ? 'bg-rose-100 text-rose-700' : 'bg-emerald-100 text-emerald-700']">
+          <span :class="['tag', txClass[t.action] || 'bg-slate-100 text-slate-700']">
             {{ txLabel[t.action] || t.action }}
           </span>
           <span class="font-medium">{{ t.item_name }}</span>

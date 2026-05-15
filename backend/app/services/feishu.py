@@ -53,6 +53,33 @@ _running_app_secret: str = ""
 _last_thread_start: float = 0.0   # monotonic seconds; gates the reconnect backoff
 _consecutive_failures: int = 0    # bumps on crash, reset on long-lived connection
 
+# Message-id dedup. Feishu (or our own reconnect) can occasionally redeliver the
+# same event; without this guard one user @mention can spawn multiple replies →
+# user sees "infinite loop" replies. LRU-ish: keep last 200 ids.
+from collections import OrderedDict
+_seen_message_ids: OrderedDict[str, float] = OrderedDict()
+_DEDUP_MAX = 200
+_DEDUP_TTL_S = 600  # 10 minutes
+
+def _already_seen(message_id: str) -> bool:
+    """Return True if we've processed this Feishu message id within the TTL."""
+    if not message_id:
+        return False
+    now = time.monotonic()
+    # Drop expired entries (cheap because OrderedDict is roughly insertion order).
+    while _seen_message_ids:
+        oldest_id, ts = next(iter(_seen_message_ids.items()))
+        if now - ts > _DEDUP_TTL_S:
+            _seen_message_ids.pop(oldest_id, None)
+        else:
+            break
+    if message_id in _seen_message_ids:
+        return True
+    _seen_message_ids[message_id] = now
+    if len(_seen_message_ids) > _DEDUP_MAX:
+        _seen_message_ids.popitem(last=False)
+    return False
+
 
 def _try_import():
     """Lazy import so an old image without lark-oapi can still start up."""
@@ -108,7 +135,7 @@ async def _run_intent(text: str, cfg) -> str:
             return f"AI 出错了: {exc}"
         parsed = out["parsed"]
         # Silent execution — same policy as DingTalk/Telegram bots.
-        if parsed.get("intent") in ("take_out", "put_in", "create_item"):
+        if parsed.get("intent") in ("take_out", "put_in", "consume", "create_item"):
             parsed["confidence"] = max(parsed.get("confidence", 0.0), 1.0)
         result = execute_intent(db, text, parsed, cfg)
         return _format_reply(result)
@@ -133,6 +160,29 @@ def _handle_message_event(data) -> None:
         event = data.event
         message = event.message
         chat_id = message.chat_id
+        message_id = getattr(message, "message_id", "") or ""
+
+        # 1. SELF-ECHO GUARD: skip messages where the sender is an app/bot. Our
+        #    own outgoing replies normally don't trigger receive_v1, but lark
+        #    has occasionally fired duplicate events during reconnect — a stray
+        #    bot-authored message must NEVER trigger another reply or we get
+        #    the infinite-reply loop the user reported.
+        sender_type = ""
+        sender_id = ""
+        try:
+            sender_type = getattr(event.sender, "sender_type", "") or ""
+            sender_id = event.sender.sender_id.open_id or ""
+        except Exception:
+            pass
+        if sender_type and sender_type.lower() in ("app", "bot"):
+            log.info("feishu: skipping message from app/bot sender (%s)", sender_id)
+            return
+
+        # 2. DEDUP: same message_id within TTL → already replied, drop.
+        if _already_seen(message_id):
+            log.info("feishu: duplicate message_id %s, dropping", message_id)
+            return
+
         content_raw = message.content or "{}"
         try:
             content = json.loads(content_raw)
@@ -144,12 +194,6 @@ def _handle_message_event(data) -> None:
         text = re.sub(r"@_user_\d+", "", text).strip()
         if not text:
             return
-
-        sender_id = ""
-        try:
-            sender_id = event.sender.sender_id.open_id or ""
-        except Exception:
-            pass
 
         cfg = store.get()
         fs = cfg.feishu

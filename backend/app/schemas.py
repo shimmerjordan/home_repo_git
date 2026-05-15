@@ -82,7 +82,8 @@ class ItemOut(ItemBase):
 
 class TransactionCreate(BaseModel):
     item_id: int
-    action: str = Field(pattern="^(take_out|put_in|adjust)$")
+    # consume = "用完了/扔了", semantically distinct from take_out (借出, needs return).
+    action: str = Field(pattern="^(take_out|put_in|adjust|consume)$")
     quantity: int = 1
     location_id: Optional[int] = None
     note: str = ""

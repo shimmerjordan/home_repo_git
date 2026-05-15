@@ -88,6 +88,15 @@ async def _handle_update(update: dict[str, Any], cfg) -> None:
     from_user = message.get("from") or {}
     user_id = from_user.get("id")
 
+    # SELF-ECHO GUARD: Telegram normally doesn't deliver the bot's own messages
+    # back via getUpdates, but `from.is_bot` is a cheap defensive check —
+    # ignore any bot-authored message (including our own) so we never reply to
+    # a reply. The getUpdates offset is already a dedup mechanism so we don't
+    # need a separate message_id cache.
+    if from_user.get("is_bot"):
+        log.info("telegram: skipping bot-authored message from %s", user_id)
+        return
+
     tg_cfg = cfg.telegram
     allowed_chats = [str(x) for x in (tg_cfg.allowed_chat_ids or [])]
     allowed_users = [str(x) for x in (tg_cfg.allowed_user_ids or [])]
@@ -119,7 +128,7 @@ async def _handle_update(update: dict[str, Any], cfg) -> None:
         parsed = out["parsed"]
         # Silent execution — DingTalk and Telegram share the policy: no UI to
         # confirm, so force-execute mutating intents that the LLM picked.
-        if parsed.get("intent") in ("take_out", "put_in", "create_item"):
+        if parsed.get("intent") in ("take_out", "put_in", "consume", "create_item"):
             parsed["confidence"] = max(parsed.get("confidence", 0.0), 1.0)
         result = execute_intent(db, text, parsed, cfg)
         await _send_message(tg_cfg.bot_token, chat_id, _format_reply(result))

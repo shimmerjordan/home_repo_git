@@ -125,7 +125,21 @@ async def webhook(request: Request, db: Session = Depends(get_db)):
     if not text:
         return {"msgtype": "text", "text": {"content": "（没听见你说什么)"}}
 
+    # SELF-ECHO GUARD: DingTalk's outgoing webhook normally only fires for human
+    # @-mentions of the bot, but defensively reject any message whose sender is
+    # the bot itself. `chatbotUserId` in the payload is the bot's user-id; if
+    # `senderId` equals it, it's a self-message — drop.
     sender = payload.get("senderStaffId") or payload.get("senderNick") or ""
+    sender_id = payload.get("senderId") or ""
+    bot_user_id = payload.get("chatbotUserId") or ""
+    if bot_user_id and sender_id and sender_id == bot_user_id:
+        app_log.warning("dingtalk: self-message from chatbotUserId=%s — dropping", bot_user_id)
+        return {"msgtype": "empty"}
+    # DingTalk supports `isInAtList` to indicate the bot was mentioned. If a
+    # webhook fires for a non-@ event, ignore it instead of replying to noise.
+    if "isInAtList" in payload and not payload.get("isInAtList"):
+        return {"msgtype": "empty"}
+
     if dt_cfg.allowed_users and sender and sender not in dt_cfg.allowed_users:
         app_log.warning("dingtalk: sender %r not allowed", sender)
         return {"msgtype": "text", "text": {"content": "你不在这个机器人的白名单里 ☹"}}
@@ -142,7 +156,7 @@ async def webhook(request: Request, db: Session = Depends(get_db)):
     # SILENT EXECUTION: force confidence high so execute_intent doesn't park
     # mutating actions behind "needs_confirmation". The user explicitly asked
     # for no-confirmation flow on DingTalk.
-    if parsed.get("intent") in ("take_out", "put_in", "create_item"):
+    if parsed.get("intent") in ("take_out", "put_in", "consume", "create_item"):
         parsed["confidence"] = max(parsed.get("confidence", 0.0), 1.0)
     result = execute_intent(db, text, parsed, cfg)
     app_log.info("dingtalk.done intent=%s exec=%s tx=%s",
