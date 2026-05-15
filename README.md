@@ -5,6 +5,8 @@
 
 # 语音仓储管家 (Voice Storage)
 
+[!部分功能视频示例](https://b23.tv/sc7kjpG)
+
 家庭杂物仓储管理系统,通过**语音 / 钉钉群 / Telegram / 飞书群**查找、存放、取出物品。
 前端跑在 iPad 浏览器,后端用 Docker Compose 部署在 N5105 这类工控 NAS 上,完全本地运行,只把意图解析的少量摘要文字发给可配置的 OpenAI 兼容 LLM。
 
