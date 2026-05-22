@@ -41,6 +41,7 @@ export const api = {
     request(`/api/items/${id}/transactions`, { method: 'POST', body: JSON.stringify(data) }),
   recentTx: (limit = 50) => request(`/api/transactions?limit=${limit}`),
   pendingReturns: () => request('/api/transactions/pending-returns'),
+  depletedItems: () => request('/api/items/depleted'),
   searchTx: (params = {}) => {
     const qs = new URLSearchParams(
       Object.entries(params).filter(([, v]) => v !== undefined && v !== null && v !== '')

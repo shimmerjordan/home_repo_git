@@ -19,8 +19,11 @@ const importMsg = ref('')
 const fileInput = ref(null)
 
 async function load() {
+  // Items tab is the canonical management view — show depleted (quantity=0)
+  // rows too so users can edit/restore them here. Search and voice paths
+  // exclude depleted by default.
   const [is_, locs] = await Promise.all([
-    api.listItems({ q: q.value || undefined, limit: 1000 }),
+    api.listItems({ q: q.value || undefined, limit: 1000, include_depleted: true }),
     api.listLocations(),
   ])
   items.value = is_

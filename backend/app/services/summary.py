@@ -38,8 +38,12 @@ def build_summary(db: Session, query: str, *, fast_mode: bool = False) -> dict:
     candidates = search_items(db, query, limit=prefilter_cap)
     need_mode = _looks_like_need(query)
 
-    # Overview: category histogram + total counts.
-    all_items: list[models.Item] = db.query(models.Item).all()
+    # Overview: category histogram + total counts. Depleted items (quantity=0)
+    # are EXCLUDED — they're in the "待补充" list and shouldn't be suggested as
+    # find/take/assist candidates by the LLM.
+    all_items: list[models.Item] = (
+        db.query(models.Item).filter(models.Item.quantity > 0).all()
+    )
     cat_counter: Counter[str] = Counter()
     for it in all_items:
         cat_counter[it.category or "未分类"] += 1

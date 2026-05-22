@@ -132,11 +132,21 @@ def _tokenize(text: str) -> list[str]:
     return out
 
 
-def search_items(db: Session, query: str, limit: int = 20) -> list[models.Item]:
-    """Score items by token overlap against name/aliases/category/tags."""
+def search_items(db: Session, query: str, limit: int = 20,
+                 include_depleted: bool = False) -> list[models.Item]:
+    """Score items by token overlap against name/aliases/category/tags.
+
+    `include_depleted=False` (default) hides items whose quantity has dropped to
+    0 (i.e. "用完了"). The voice/intent path uses this default so "充电宝在哪"
+    after the user said "我用完了充电宝" won't surface the depleted record.
+    The "待补充" UI passes include_depleted=True via the dedicated endpoint.
+    """
     tokens = _tokenize(query)
     if not tokens:
-        return db.query(models.Item).limit(limit).all()
+        q = db.query(models.Item)
+        if not include_depleted:
+            q = q.filter(models.Item.quantity > 0)
+        return q.limit(limit).all()
 
     # Build OR-of-LIKE for each token so the DB pre-filters.
     conds = []
@@ -146,7 +156,10 @@ def search_items(db: Session, query: str, limit: int = 20) -> list[models.Item]:
         conds.append(models.Item.aliases.ilike(like))
         conds.append(models.Item.category.ilike(like))
         conds.append(models.Item.tags.ilike(like))
-    rows: Iterable[models.Item] = db.query(models.Item).filter(or_(*conds)).all()
+    base_query = db.query(models.Item).filter(or_(*conds))
+    if not include_depleted:
+        base_query = base_query.filter(models.Item.quantity > 0)
+    rows: Iterable[models.Item] = base_query.all()
 
     def score(item: models.Item) -> float:
         haystack = " ".join([

@@ -129,6 +129,40 @@ async function loadPending() {
   try { pendingReturns.value = await api.pendingReturns() } catch {}
 }
 
+// "待补充" items — quantity==0 records that are HIDDEN from search/voice. The
+// user either re-stocks them (and quantity goes up via put_in) or decides
+// they're permanently gone and deletes the row.
+const depletedItems = ref([])
+async function loadDepleted() {
+  try { depletedItems.value = await api.depletedItems() } catch {}
+}
+
+async function deleteDepleted(it) {
+  if (!confirm(`确认从数据库永久删除「${it.name}」?这条物品记录会消失,审计日志会保留。`)) return
+  try {
+    await api.deleteItem(it.id)
+    await loadDepleted()
+    emit('changed')
+  } catch (e) { console.warn('delete depleted failed', e) }
+}
+
+async function restockDepleted(it) {
+  const qtyStr = prompt(`补充「${it.name}」多少件?`, '1')
+  const qty = parseInt(qtyStr || '0', 10)
+  if (!qty || qty <= 0) return
+  try {
+    await api.recordTx(it.id, {
+      item_id: it.id,
+      action: 'put_in',
+      quantity: qty,
+      location_id: it.location_id || null,
+      note: '手动补充',
+    })
+    await loadDepleted()
+    emit('changed')
+  } catch (e) { console.warn('restock failed', e) }
+}
+
 // "已归位" — record a put_in transaction that nets against the open take_out,
 // then refresh the pending list.
 async function markReturned(p) {
@@ -173,8 +207,8 @@ function timeAgo(iso) {
   return `${d} 天前`
 }
 
-onMounted(() => { loadRecent(); loadScene(); loadPending() })
-watch(() => props.refreshKey, () => { loadRecent(); loadScene(); loadPending() })
+onMounted(() => { loadRecent(); loadScene(); loadPending(); loadDepleted() })
+watch(() => props.refreshKey, () => { loadRecent(); loadScene(); loadPending(); loadDepleted() })
 
 // When the user explicitly picks a candidate via "选这个", we must NOT let the
 // auto-multi-highlight logic re-light all same-name items — the watcher would
@@ -780,6 +814,35 @@ const inConfirm = computed(() => phase.value === 'confirm-text' || phase.value =
           </div>
         </div>
       </div>
+    </div>
+
+    <!-- Depleted items (待补充) — items whose quantity dropped to 0. They're
+         HIDDEN from search/voice/3D so stale records don't pollute results;
+         this is the only place to act on them: either restock (revives the
+         item via put_in) or delete (audit-logged permanent removal). -->
+    <div v-if="depletedItems.length" class="card p-4 border-rose-300 border-2 bg-rose-50">
+      <div class="flex items-center justify-between mb-2">
+        <div class="font-semibold flex items-center gap-2">
+          <span>📭 待补充</span>
+          <span class="tag bg-rose-200 text-rose-900">{{ depletedItems.length }}</span>
+        </div>
+        <button class="text-xs text-slate-500 hover:text-slate-800" @click="loadDepleted">↻</button>
+      </div>
+      <div class="text-xs text-slate-600 mb-2">
+        这些物品库存已归零, 搜索和 3D 视图都不会再显示。
+        如果还会买就点 <b>补货</b>;以后不要了就点 <b>永久删除</b>(操作会写入审计日志)。
+      </div>
+      <ul class="divide-y divide-rose-200">
+        <li v-for="it in depletedItems" :key="it.id" class="py-2 flex items-center gap-2 text-sm flex-wrap">
+          <span class="font-medium">{{ it.name }}</span>
+          <span v-if="it.aliases" class="text-xs text-slate-400">({{ it.aliases }})</span>
+          <span class="text-xs text-slate-500 truncate flex-1 min-w-0">
+            {{ it.location_path || '未指定位置' }}
+          </span>
+          <button class="btn btn-secondary text-xs" @click="restockDepleted(it)" title="补充库存,回到正常列表">⇪ 补货</button>
+          <button class="btn btn-danger text-xs" @click="deleteDepleted(it)" title="从数据库永久删除">🗑 永久删除</button>
+        </li>
+      </ul>
     </div>
 
     <!-- Pending returns (借出未归位) — surfaced prominently above the recent

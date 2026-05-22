@@ -254,6 +254,10 @@ def list_items(
     location_id: int | None = Query(None),
     category: str | None = Query(None),
     limit: int = Query(200, ge=1, le=1000),
+    # quantity == 0 = 用完/缺货, 默认对搜索和列表都隐藏(它们在 "待补充" 页面单独显示)。
+    # 物品页 / CSV 导出等需要看全部的场景显式传 include_depleted=true。
+    include_depleted: bool = Query(False),
+    only_depleted: bool = Query(False),
     db: Session = Depends(get_db),
 ):
     if q:
@@ -265,6 +269,29 @@ def list_items(
         if category:
             query = query.filter(models.Item.category == category)
         rows = query.order_by(models.Item.updated_at.desc()).limit(limit).all()
+    if only_depleted:
+        rows = [r for r in rows if (r.quantity or 0) <= 0]
+    elif not include_depleted:
+        rows = [r for r in rows if (r.quantity or 0) > 0]
+    return [serialize_item(r) for r in rows]
+
+
+@router.get("/depleted")
+def list_depleted(db: Session = Depends(get_db)):
+    """物品消耗完(quantity ≤ 0)的 "待补充" 列表。
+
+    与 pending-returns 是两类提醒:
+      - 待补充: 用完了, 库存=0, 需要重新购入或决定弃用
+      - 待归位: 借出未归位, 物理上还在外面
+    UI 在待补充列表里把"已弃用 → 从数据库清除"的删除操作做掉。删除走标准
+    DELETE /api/items/{id}, audit 会记录。
+    """
+    rows = (
+        db.query(models.Item)
+        .filter((models.Item.quantity == 0) | (models.Item.quantity.is_(None)))
+        .order_by(models.Item.updated_at.desc())
+        .all()
+    )
     return [serialize_item(r) for r in rows]
 
 
