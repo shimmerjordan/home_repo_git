@@ -3,46 +3,14 @@ from fastapi import APIRouter, HTTPException
 from ..config import AppConfig, store
 from ..llm.client import LLMClient, LLMError
 from ..schemas import ConfigPatch
+from ..services import secrets
 
 router = APIRouter(prefix="/api/settings", tags=["settings"])
 
 
 def _redact(cfg: AppConfig) -> dict:
-    data = cfg.model_dump()
-    if data["llm"].get("api_key"):
-        key = data["llm"]["api_key"]
-        data["llm"]["api_key_set"] = True
-        data["llm"]["api_key"] = (key[:4] + "***" + key[-2:]) if len(key) > 6 else "***"
-    else:
-        data["llm"]["api_key_set"] = False
-        data["llm"]["api_key"] = ""
-    # DingTalk secrets follow the same redaction pattern as the LLM key.
-    dt = data.get("dingtalk") or {}
-    for fld in ("sign_secret", "outgoing_sign_secret"):
-        if dt.get(fld):
-            v = dt[fld]
-            dt[fld] = (v[:3] + "***" + v[-2:]) if len(v) > 6 else "***"
-            dt[fld + "_set"] = True
-        else:
-            dt[fld + "_set"] = False
-            dt[fld] = ""
-    tg = data.get("telegram") or {}
-    if tg.get("bot_token"):
-        v = tg["bot_token"]
-        tg["bot_token"] = (v[:4] + "***" + v[-3:]) if len(v) > 8 else "***"
-        tg["bot_token_set"] = True
-    else:
-        tg["bot_token_set"] = False
-        tg["bot_token"] = ""
-    fs = data.get("feishu") or {}
-    if fs.get("app_secret"):
-        v = fs["app_secret"]
-        fs["app_secret"] = (v[:3] + "***" + v[-2:]) if len(v) > 6 else "***"
-        fs["app_secret_set"] = True
-    else:
-        fs["app_secret_set"] = False
-        fs["app_secret"] = ""
-    return data
+    """脱敏后的完整配置 (密钥打码 + `<field>_set` 标记)。逻辑见 services/secrets.py。"""
+    return secrets.redact(cfg.model_dump())
 
 
 @router.get("")

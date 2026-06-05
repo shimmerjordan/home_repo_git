@@ -8,3 +8,8 @@ python-multipart==0.0.12
 # Feishu/Lark Stream Mode SDK — optional; backend gracefully skips the Feishu bot
 # if this package isn't importable (so old images don't break on the new feature).
 lark-oapi==1.4.15
+# WebDAV backup — optional & graceful: webdav4 is the WebDAV client, cryptography
+# does AES-256 backup encryption. If either is missing the backend still boots;
+# only the corresponding capability is unavailable (see services/backup.py).
+webdav4==0.10.0
+cryptography==43.0.1

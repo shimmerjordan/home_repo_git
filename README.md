@@ -29,6 +29,8 @@ cd repo_git
 | **[architecture](docs/architecture.md)** | 运行时拓扑 / 项目结构 / 数据模型 / 启动顺序 / LLM 摘要算法 |
 | **[voice](docs/voice.md)** | 语音状态机 / LLM 配置 / 加速 tips / iOS 注意事项 |
 | **[api](docs/api.md)** | REST API 速查 + OpenAPI 文档入口 |
+| **[backup](docs/backup.md)** | WebDAV 备份 / 选择性 + GFS 分层保留 / AES 加密 / 恢复 |
+| **[wechat-miniprogram](docs/wechat-miniprogram.md)** | 微信小程序可行性调研 + 纯本地架构 + 个人开发者上架教程 |
 | **[bots/](docs/bots/README.md)** | 群机器人接入总览 + 对比表 |
 | ├─ [钉钉](docs/bots/dingtalk.md) | inbound webhook + 加签 (需公网) |
 | ├─ [Telegram](docs/bots/telegram.md) | 长轮询 (无公网, 国内需翻墙) |
@@ -45,6 +47,7 @@ cd repo_git
 - **多个家**:顶层 "家" 分组 ("我家" / "老家" / "父母家"),3D 页可切换
 - **流水 + 审计日志**:每次取出/存入/盘点都记;每个字段的修改 git-blame 风格可查
 - **CSV 导入导出**:路径 `家/房间/箱子/上层` 自动按层级建缺失节点;**老 CSV (无家前缀) 向后兼容**
+- **WebDAV 备份**:全量数据备份到坚果云/Nextcloud/群晖等;选择性组件 + GFS 日/周/月分层保留 + 定时 + AES-256 加密 + 一键恢复 ([配置](docs/backup.md))
 
 ### 多渠道交互
 - **iPad 语音**:大圆按钮 + 唤醒词 + 双层确认 + 30s 沉默自动确认 + TTS 朗读

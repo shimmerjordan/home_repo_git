@@ -185,12 +185,29 @@ class FeishuConfigPatch(BaseModel):
     allowed_open_ids: Optional[list[str]] = None
 
 
+class WebDAVConfigPatch(BaseModel):
+    enabled: Optional[bool] = None
+    url: Optional[str] = None
+    username: Optional[str] = None
+    password: Optional[str] = None
+    remote_dir: Optional[str] = None
+    components: Optional[list[str]] = None
+    encrypt: Optional[bool] = None
+    passphrase: Optional[str] = None
+    schedule: Optional[str] = None
+    hour: Optional[int] = None
+    keep_daily: Optional[int] = None
+    keep_weekly: Optional[int] = None
+    keep_monthly: Optional[int] = None
+
+
 class ConfigPatch(BaseModel):
     llm: Optional[LLMConfigPatch] = None
     voice: Optional[VoiceConfigPatch] = None
     dingtalk: Optional[DingTalkConfigPatch] = None
     telegram: Optional[TelegramConfigPatch] = None
     feishu: Optional[FeishuConfigPatch] = None
+    webdav: Optional[WebDAVConfigPatch] = None
 
 
 # --- Audit log ---

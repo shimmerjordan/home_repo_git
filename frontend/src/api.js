@@ -93,4 +93,29 @@ export const api = {
   updateSettings: (patch) =>
     request('/api/settings', { method: 'PATCH', body: JSON.stringify(patch) }),
   testLLM: () => request('/api/settings/test-llm', { method: 'POST' }),
+
+  // backup (WebDAV)
+  getBackupSettings: () => request('/api/backup/settings'),
+  updateBackupSettings: (patch) =>
+    request('/api/backup/settings', { method: 'PATCH', body: JSON.stringify(patch) }),
+  testBackup: () => request('/api/backup/test', { method: 'POST' }),
+  runBackup: (components = null) =>
+    request('/api/backup/run', { method: 'POST', body: JSON.stringify({ components }) }),
+  listBackups: () => request('/api/backup/list'),
+  downloadBackupUrl: (name) => `/api/backup/download/${encodeURIComponent(name)}`,
+  deleteBackup: (name) => request(`/api/backup/${encodeURIComponent(name)}`, { method: 'DELETE' }),
+  restoreBackup: (name, targets, passphrase = '') =>
+    request('/api/backup/restore', {
+      method: 'POST',
+      body: JSON.stringify({ name, targets, passphrase }),
+    }),
+  restoreBackupUpload: async (file, targets, passphrase = '') => {
+    const fd = new FormData()
+    fd.append('file', file)
+    fd.append('passphrase', passphrase)
+    fd.append('targets', (targets || []).join(','))
+    const res = await fetch('/api/backup/restore-upload', { method: 'POST', body: fd })
+    if (!res.ok) throw new Error(await res.text())
+    return res.json()
+  },
 }

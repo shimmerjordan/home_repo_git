@@ -84,12 +84,38 @@ class FeishuConfig(BaseModel):
     allowed_open_ids: list[str] = Field(default_factory=list)
 
 
+class WebDAVConfig(BaseModel):
+    """异地备份到任意 WebDAV 网盘 (坚果云 / Nextcloud / 群晖 / InfiniCLOUD 等)。
+    备份内容: SQLite 库 (物品/位置/流水/审计) + config.json (app 设置) + 系统日志。
+    支持选择性组件、GFS 分层保留、定时自动备份、AES-256 口令加密、恢复。"""
+    enabled: bool = Field(default=False, description="是否启用 WebDAV 备份调度")
+    url: str = Field(default="", description="WebDAV 根地址, 如 https://dav.jianguoyun.com/dav/")
+    username: str = Field(default="", description="WebDAV 账号 (坚果云用邮箱)")
+    password: str = Field(default="", description="WebDAV 密码 / 应用授权密码")
+    remote_dir: str = Field(default="voice-storage-backups", description="远程子目录")
+    # 选择性备份: 勾选哪些组件入包。inventory = 物品+位置 (整库快照),
+    # transactions / audit 为逻辑 JSON 导出, logs = 系统日志文件。
+    components: list[str] = Field(
+        default_factory=lambda: ["settings", "inventory", "transactions", "audit", "logs"]
+    )
+    encrypt: bool = Field(default=True, description="是否用口令对备份包做 AES-256 加密")
+    passphrase: str = Field(default="", description="加密口令 (留空且 encrypt=true 时跳过加密)")
+    # 调度: manual=只手动; hourly=每小时; daily/weekly 在 hour 点触发。
+    schedule: str = Field(default="manual", description="manual / hourly / daily / weekly")
+    hour: int = Field(default=3, ge=0, le=23, description="daily/weekly 触发的小时 (本地时区)")
+    # GFS 分层保留: 自动清理过期备份, 各保留最近 N 个。
+    keep_daily: int = Field(default=7, ge=0, le=365)
+    keep_weekly: int = Field(default=4, ge=0, le=520)
+    keep_monthly: int = Field(default=6, ge=0, le=120)
+
+
 class AppConfig(BaseModel):
     llm: LLMConfig = Field(default_factory=LLMConfig)
     voice: VoiceConfig = Field(default_factory=VoiceConfig)
     dingtalk: DingTalkConfig = Field(default_factory=DingTalkConfig)
     telegram: TelegramConfig = Field(default_factory=TelegramConfig)
     feishu: FeishuConfig = Field(default_factory=FeishuConfig)
+    webdav: WebDAVConfig = Field(default_factory=WebDAVConfig)
 
 
 class ConfigStore:
@@ -115,6 +141,12 @@ class ConfigStore:
 
     def get(self) -> AppConfig:
         with self._lock:
+            return self._config.model_copy(deep=True)
+
+    def reload(self) -> AppConfig:
+        """从磁盘重新加载配置 (备份恢复覆盖 config.json 后调用)。"""
+        with self._lock:
+            self._config = self._load()
             return self._config.model_copy(deep=True)
 
     def update(self, patch: dict[str, Any]) -> AppConfig:

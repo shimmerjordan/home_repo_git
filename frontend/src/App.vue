@@ -6,6 +6,7 @@ import LocationManager from './components/LocationManager.vue'
 import SettingsPanel from './components/SettingsPanel.vue'
 import TransactionFeed from './components/TransactionFeed.vue'
 import LogsPanel from './components/LogsPanel.vue'
+import BackupPanel from './components/BackupPanel.vue'
 import BuildingPanel from './components/BuildingPanel.vue'
 import AuditPanel from './components/AuditPanel.vue'
 import { api } from './api'
@@ -111,6 +112,7 @@ const tabs = [
   { id: 'log', label: '记录', icon: '📜' },
   { id: 'audit', label: '变更', icon: '🕓' },
   { id: 'logs', label: '诊断', icon: '🔧' },
+  { id: 'backup', label: '备份', icon: '☁' },
   { id: 'settings', label: '设置', icon: '⚙' },
 ]
 </script>
@@ -148,6 +150,7 @@ const tabs = [
       <TransactionFeed v-show="tab==='log'" :refresh-key="refreshKey" />
       <AuditPanel v-show="tab==='audit'" :refresh-key="refreshKey" />
       <LogsPanel v-show="tab==='logs'" />
+      <BackupPanel v-show="tab==='backup'" />
       <SettingsPanel v-show="tab==='settings'" @saved="loadSettings" />
     </main>
 
