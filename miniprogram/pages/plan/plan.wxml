@@ -1,0 +1,13 @@
+<view class="card">
+  <view style="font-weight:600;margin-bottom:8rpx">平面图</view>
+  <view wx:if="{{empty}}" class="muted">还没有房间。去「位置」页添加房间后再来看。</view>
+  <canvas wx:else type="2d" id="plan" class="plan-canvas"></canvas>
+</view>
+
+<view class="card">
+  <view style="font-weight:600;margin-bottom:8rpx">房间物品统计</view>
+  <view wx:for="{{rooms}}" wx:key="id" class="row between" style="padding:12rpx 0;border-top:1rpx solid #f1f5f9">
+    <text>{{item.name}}</text>
+    <text class="muted">{{item.count}} 件</text>
+  </view>
+</view>

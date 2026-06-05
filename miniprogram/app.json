@@ -1,0 +1,40 @@
+{
+  "pages": [
+    "pages/assistant/assistant",
+    "pages/items/items",
+    "pages/item-edit/item-edit",
+    "pages/locations/locations",
+    "pages/plan/plan",
+    "pages/backup/backup",
+    "pages/settings/settings"
+  ],
+  "window": {
+    "navigationBarBackgroundColor": "#0f172a",
+    "navigationBarTextStyle": "white",
+    "navigationBarTitleText": "语音仓储管家",
+    "backgroundColor": "#f1f5f9"
+  },
+  "tabBar": {
+    "color": "#64748b",
+    "selectedColor": "#0ea5e9",
+    "backgroundColor": "#ffffff",
+    "list": [
+      { "pagePath": "pages/assistant/assistant", "text": "助手" },
+      { "pagePath": "pages/items/items", "text": "物品" },
+      { "pagePath": "pages/locations/locations", "text": "位置" },
+      { "pagePath": "pages/plan/plan", "text": "平面图" },
+      { "pagePath": "pages/backup/backup", "text": "备份" }
+    ]
+  },
+  "plugins": {
+    "WechatSI": {
+      "version": "0.3.5",
+      "provider": "wx069ba97219f66d99"
+    }
+  },
+  "permission": {
+    "scope.record": { "desc": "用于语音查找/存取物品" }
+  },
+  "style": "v2",
+  "sitemapLocation": "sitemap.json"
+}

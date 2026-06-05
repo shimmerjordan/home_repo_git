@@ -1,0 +1,49 @@
+/* 全局样式: 贴近 NAS 版 Tailwind 的卡片/按钮观感 */
+page {
+  background: #f1f5f9;
+  color: #0f172a;
+  font-size: 28rpx;
+}
+.card {
+  background: #fff;
+  border-radius: 16rpx;
+  padding: 24rpx;
+  margin: 16rpx;
+  box-shadow: 0 2rpx 8rpx rgba(15, 23, 42, 0.06);
+}
+.row { display: flex; align-items: center; }
+.between { justify-content: space-between; }
+.muted { color: #64748b; font-size: 24rpx; }
+.label { color: #475569; font-size: 24rpx; margin-bottom: 6rpx; display: block; }
+.input {
+  background: #f8fafc;
+  border: 1rpx solid #e2e8f0;
+  border-radius: 10rpx;
+  padding: 16rpx;
+  width: 100%;
+  box-sizing: border-box;
+}
+.btn {
+  display: inline-block;
+  padding: 16rpx 28rpx;
+  border-radius: 10rpx;
+  font-size: 26rpx;
+  text-align: center;
+  line-height: 1.2;
+}
+.btn-primary { background: #0ea5e9; color: #fff; }
+.btn-secondary { background: #e2e8f0; color: #0f172a; }
+.btn-danger { background: #fee2e2; color: #b91c1c; }
+.btn[disabled] { opacity: 0.5; }
+.tag {
+  display: inline-block;
+  background: #e0f2fe;
+  color: #0369a1;
+  border-radius: 8rpx;
+  padding: 4rpx 12rpx;
+  font-size: 22rpx;
+  margin-right: 8rpx;
+}
+.gap > view, .gap > button { margin-bottom: 12rpx; }
+.err { color: #b91c1c; font-size: 24rpx; }
+.ok { color: #047857; font-size: 24rpx; }

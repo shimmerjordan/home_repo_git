@@ -1,0 +1,17 @@
+{
+  "description": "语音仓储管家 — 微信小程序 (纯本地, 无后端)。与 repo_git 的 frontend/backend 完全隔离。",
+  "appid": "touristappid",
+  "projectname": "voice-storage-miniprogram",
+  "compileType": "miniprogram",
+  "libVersion": "2.30.0",
+  "setting": {
+    "es6": true,
+    "enhance": true,
+    "postcss": true,
+    "minified": true,
+    "urlCheck": false,
+    "newFeature": true,
+    "nodeModules": false
+  },
+  "condition": {}
+}

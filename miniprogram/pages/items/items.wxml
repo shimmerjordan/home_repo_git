@@ -1,0 +1,19 @@
+<view class="card">
+  <input class="input" placeholder="搜索物品 / 别名 / 分类 / 标签" value="{{keyword}}" bindinput="onInput" />
+</view>
+
+<view wx:if="{{items.length === 0}}" class="card muted">还没有物品，点右下角 + 添加。</view>
+
+<view wx:for="{{items}}" wx:key="id" class="card" bindtap="goEdit" data-id="{{item.id}}">
+  <view class="row between">
+    <view style="font-weight:600">{{item.name}}</view>
+    <view class="muted">×{{item.quantity}}</view>
+  </view>
+  <view wx:if="{{item.location_path}}" class="muted">📍 {{item.location_path}}</view>
+  <view wx:if="{{item.category || item.tags}}" style="margin-top:8rpx">
+    <text wx:if="{{item.category}}" class="tag">{{item.category}}</text>
+    <text wx:if="{{item.tags}}" class="tag">{{item.tags}}</text>
+  </view>
+</view>
+
+<view class="fab" bindtap="goAdd">＋</view>

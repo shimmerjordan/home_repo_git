@@ -1,0 +1,51 @@
+<view class="card gap">
+  <view>
+    <text class="label">名称 *</text>
+    <input class="input" value="{{form.name}}" data-field="name" bindinput="onField" />
+  </view>
+  <view>
+    <text class="label">别名 (逗号分隔)</text>
+    <input class="input" value="{{form.aliases}}" data-field="aliases" bindinput="onField" />
+  </view>
+  <view class="row" style="gap:16rpx">
+    <view style="flex:1">
+      <text class="label">分类</text>
+      <input class="input" value="{{form.category}}" data-field="category" bindinput="onField" />
+    </view>
+    <view style="flex:1">
+      <text class="label">标签</text>
+      <input class="input" value="{{form.tags}}" data-field="tags" bindinput="onField" />
+    </view>
+  </view>
+  <view class="row" style="gap:16rpx">
+    <view style="flex:1">
+      <text class="label">数量</text>
+      <input class="input" type="number" value="{{form.quantity}}" data-field="quantity" bindinput="onField" />
+    </view>
+    <view style="flex:1">
+      <text class="label">单价</text>
+      <input class="input" type="digit" value="{{form.price}}" data-field="price" bindinput="onField" />
+    </view>
+  </view>
+  <view>
+    <text class="label">位置</text>
+    <picker mode="selector" range="{{locOptions}}" range-key="label" value="{{locIndex}}" bindchange="onLoc">
+      <view class="input">{{locOptions[locIndex].label}}</view>
+    </picker>
+  </view>
+  <view>
+    <text class="label">备注</text>
+    <textarea class="input" value="{{form.note}}" data-field="note" bindinput="onField" style="height:120rpx" />
+  </view>
+  <view wx:if="{{err}}" class="err">{{err}}</view>
+</view>
+
+<view wx:if="{{id}}" class="card row" style="gap:16rpx">
+  <button class="btn btn-secondary" style="flex:1" data-action="take_out" bindtap="tx">取出 1</button>
+  <button class="btn btn-secondary" style="flex:1" data-action="put_in" bindtap="tx">存入 1</button>
+</view>
+
+<view class="card row" style="gap:16rpx">
+  <button class="btn btn-primary" style="flex:1" bindtap="save">保存</button>
+  <button wx:if="{{id}}" class="btn btn-danger" style="flex:1" bindtap="del">删除</button>
+</view>

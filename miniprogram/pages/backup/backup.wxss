@@ -1,0 +1,1 @@
+.break { word-break: break-all; font-size: 24rpx; }

@@ -30,7 +30,9 @@ cd repo_git
 | **[voice](docs/voice.md)** | 语音状态机 / LLM 配置 / 加速 tips / iOS 注意事项 |
 | **[api](docs/api.md)** | REST API 速查 + OpenAPI 文档入口 |
 | **[backup](docs/backup.md)** | WebDAV 备份 / 选择性 + GFS 分层保留 / AES 加密 / 恢复 |
-| **[wechat-miniprogram](docs/wechat-miniprogram.md)** | 微信小程序可行性调研 + 纯本地架构 + 个人开发者上架教程 |
+| **[wechat-miniprogram](docs/wechat-miniprogram.md)** | 微信小程序可行性调研 + 纯本地架构 + 进度 |
+| **[deployment-miniprogram](docs/deployment-miniprogram.md)** | 小程序本地运行 + 个人开发者上架 + 与 NAS 版数据互通 |
+| **[miniprogram/](miniprogram/README.md)** | 微信小程序代码 (独立第三端, 与前后端隔离) |
 | **[bots/](docs/bots/README.md)** | 群机器人接入总览 + 对比表 |
 | ├─ [钉钉](docs/bots/dingtalk.md) | inbound webhook + 加签 (需公网) |
 | ├─ [Telegram](docs/bots/telegram.md) | 长轮询 (无公网, 国内需翻墙) |

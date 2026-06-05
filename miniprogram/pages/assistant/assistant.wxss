@@ -1,0 +1,17 @@
+.chat { padding: 16rpx; padding-bottom: 140rpx; }
+.msg { display: flex; margin-bottom: 16rpx; }
+.msg.user { justify-content: flex-end; }
+.bubble { max-width: 78%; border-radius: 16rpx; padding: 18rpx 22rpx; }
+.bubble.bot { background: #fff; }
+.bubble.user { background: #0ea5e9; color: #fff; }
+.cands { margin-top: 12rpx; }
+.cand { background: #f1f5f9; color: #0f172a; border-radius: 8rpx; padding: 10rpx 14rpx; margin-top: 8rpx; font-size: 24rpx; }
+.composer {
+  position: fixed; left: 0; right: 0; bottom: 0;
+  background: #fff; padding: 16rpx; display: flex; align-items: center; gap: 12rpx;
+  box-shadow: 0 -2rpx 8rpx rgba(15,23,42,0.06);
+}
+.composer .input { flex: 1; }
+.mic { width: 80rpx; height: 72rpx; line-height: 72rpx; text-align: center; background: #e2e8f0; border-radius: 10rpx; padding: 0; }
+.mic.rec { background: #fecaca; }
+.gear { font-size: 40rpx; padding: 0 8rpx; }

@@ -158,16 +158,18 @@ repo_git/
 
 ---
 
-## 6. 建议的落地计划
+## 6. 落地计划与进度
 
-1. 先复用本次的**备份包格式**作为两端数据契约(已落地,见 [`backup.md`](backup.md))。
-2. 建 `miniprogram/` 脚手架,实现**本地数据层 + 物品/位置 CRUD**,用「导入 NAS 备份包」验证数据兼容。
-3. 接 WebDAV 备份/恢复(直接对齐本项目格式),实现真正的跨端一份数据。
-4. 加 LLM + 同声传译语音。
-5. (可选) Three.js 移植 3D。
-6. 个人认证 → 上传 → 提审 → 发布。
+1. ✅ 复用备份包格式作为两端数据契约(见 [`backup.md`](backup.md))。
+2. ✅ 本地数据层 + 物品/位置 CRUD + 取出存入流水(`wx.storage` + `FileSystemManager` 200MB)。
+3. ✅ WebDAV 备份/恢复,**与 NAS 版双向互通**:小程序备份→NAS 恢复(JSON 回退)、NAS 备份→小程序恢复(内置 DEFLATE inflate)、**AES-256-GCM 加密双向字节级互通**。
+4. ✅ LLM 语义意图解析(移植 `intent.py`)+ 同声传译语音(插件)+ 助手页。
+5. ✅ 2D 平面图(Canvas 2D);完整 Three.js 3D 列为后续增强(非必需)。
+6. ⬜ 个人认证 → 上传 → 提审 → 发布(教程见 [`deployment-miniprogram.md`](deployment-miniprogram.md))。
 
-> 如需,我可以按此计划接着实现 **MVP(本地数据层 + 备份)** 的小程序代码 —— 它与现有前后端完全隔离,不影响现有编译与使用。
+> **代码见 [`../miniprogram/`](../miniprogram/README.md)**,与现有前后端完全隔离,微信开发者工具单独打开即可。
+> 已 node/Python 验证:zip 双向互通、AES 加密双向互通、数据层 CRUD、意图解析+执行、小程序(加密)备份 → NAS 后端恢复(数据/层级/流水/审计完整还原)。
+> 部署与上架完整教程: [`deployment-miniprogram.md`](deployment-miniprogram.md)。
 
 ---
 

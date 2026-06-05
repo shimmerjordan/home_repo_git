@@ -1,0 +1,53 @@
+<view class="card gap">
+  <view style="font-weight:600">大模型 (LLM)</view>
+  <view>
+    <text class="label">预设</text>
+    <view class="row" style="flex-wrap:wrap;gap:12rpx;margin-top:8rpx">
+      <button wx:for="{{presets}}" wx:key="label" class="btn btn-secondary" size="mini"
+        data-i="{{index}}" bindtap="applyPreset">{{item.label}}</button>
+    </view>
+  </view>
+  <view>
+    <text class="label">Base URL (兼容 OpenAI 协议)</text>
+    <input class="input" value="{{llm.base_url}}" data-field="base_url" bindinput="onLlm" placeholder="https://api.siliconflow.cn/v1" />
+  </view>
+  <view>
+    <text class="label">API Key</text>
+    <input class="input" password value="{{llm.api_key}}" data-field="api_key" bindinput="onLlm" placeholder="sk-..." />
+  </view>
+  <view>
+    <text class="label">Model</text>
+    <input class="input" value="{{llm.model}}" data-field="model" bindinput="onLlm" />
+  </view>
+  <view class="row" style="gap:16rpx">
+    <view style="flex:1">
+      <text class="label">Temperature</text>
+      <input class="input" type="digit" value="{{llm.temperature}}" data-field="temperature" bindinput="onLlm" />
+    </view>
+    <view style="flex:1">
+      <text class="label">Max tokens</text>
+      <input class="input" type="number" value="{{llm.max_tokens}}" data-field="max_tokens" bindinput="onLlm" />
+    </view>
+  </view>
+  <view>
+    <text class="label">置信度阈值: {{voice.confidence_threshold}} (低于此值先让你确认)</text>
+    <slider min="0" max="1" step="0.05" value="{{voice.confidence_threshold}}" show-value bindchange="onThreshold" />
+  </view>
+  <view class="muted">⚠️ api_key 保存在本地 (个人自用)。发布需把 Base URL 域名加入小程序「合法域名」。</view>
+</view>
+
+<view class="card gap">
+  <view style="font-weight:600">备份加密</view>
+  <view>
+    <text class="label">加密口令 (留空=不加密；与 NAS 版互通)</text>
+    <input class="input" password value="{{webdavPass}}" bindinput="onWebdavPass" placeholder="AES-256-GCM 口令" />
+  </view>
+  <view class="muted">⚠️ 口令丢失将无法恢复加密备份，请妥善保管。</view>
+</view>
+
+<view class="card row" style="gap:16rpx">
+  <button class="btn btn-primary" style="flex:1" bindtap="save">保存</button>
+  <button class="btn btn-secondary" style="flex:1" bindtap="test">测试 LLM</button>
+</view>
+<view wx:if="{{testMsg}}" class="card"><text class="{{testMsg[0]==='❌'?'err':'ok'}}">{{testMsg}}</text></view>
+<view wx:if="{{savedMsg}}" class="card ok">{{savedMsg}}</view>
