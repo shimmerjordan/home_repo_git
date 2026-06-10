@@ -2,15 +2,15 @@ const store = require('../../utils/store.js')
 const llm = require('../../utils/llm.js')
 
 const PRESETS = [
-  { label: '硅基流动', base_url: 'https://api.siliconflow.cn/v1', model: 'Qwen/Qwen2.5-7B-Instruct' },
-  { label: 'DeepSeek', base_url: 'https://api.deepseek.com/v1', model: 'deepseek-chat' },
-  { label: '智谱 GLM', base_url: 'https://open.bigmodel.cn/api/paas/v4', model: 'glm-4-flash' },
-  { label: 'OpenAI', base_url: 'https://api.openai.com/v1', model: 'gpt-4o-mini' },
+  { label: '硅基流动', base_url: 'https://api.siliconflow.cn/v1', model: 'Qwen/Qwen2.5-7B-Instruct', asr_model: 'FunAudioLLM/SenseVoiceSmall' },
+  { label: 'DeepSeek', base_url: 'https://api.deepseek.com/v1', model: 'deepseek-chat', asr_model: '' },
+  { label: '智谱 GLM', base_url: 'https://open.bigmodel.cn/api/paas/v4', model: 'glm-4-flash', asr_model: '' },
+  { label: 'OpenAI', base_url: 'https://api.openai.com/v1', model: 'gpt-4o-mini', asr_model: 'whisper-1' },
 ]
 
 Page({
   data: {
-    llm: { base_url: '', api_key: '', model: '', temperature: 0.2, max_tokens: 512 },
+    llm: { base_url: '', api_key: '', model: '', asr_model: '', temperature: 0.2, max_tokens: 512 },
     voice: { confidence_threshold: 0.5 },
     webdavPass: '',
     presets: PRESETS,
@@ -30,13 +30,14 @@ Page({
   onWebdavPass(e) { this.setData({ webdavPass: e.detail.value }) },
   applyPreset(e) {
     const p = PRESETS[e.currentTarget.dataset.i]
-    this.setData({ 'llm.base_url': p.base_url, 'llm.model': p.model })
+    this.setData({ 'llm.base_url': p.base_url, 'llm.model': p.model, 'llm.asr_model': p.asr_model || '' })
   },
   save() {
     const llmCfg = {
       base_url: this.data.llm.base_url,
       api_key: this.data.llm.api_key,
       model: this.data.llm.model,
+      asr_model: this.data.llm.asr_model || '',
       temperature: Number(this.data.llm.temperature) || 0.2,
       max_tokens: Number(this.data.llm.max_tokens) || 512,
     }

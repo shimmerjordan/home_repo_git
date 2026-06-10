@@ -16,8 +16,12 @@
     <input class="input" password value="{{llm.api_key}}" data-field="api_key" bindinput="onLlm" placeholder="sk-..." />
   </view>
   <view>
-    <text class="label">Model</text>
+    <text class="label">Model (对话)</text>
     <input class="input" value="{{llm.model}}" data-field="model" bindinput="onLlm" />
+  </view>
+  <view>
+    <text class="label">ASR Model (语音转文字，留空=whisper-1)</text>
+    <input class="input" value="{{llm.asr_model}}" data-field="asr_model" bindinput="onLlm" placeholder="硅基流动: FunAudioLLM/SenseVoiceSmall" />
   </view>
   <view class="row" style="gap:16rpx">
     <view style="flex:1">

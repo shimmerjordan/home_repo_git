@@ -1,40 +1,58 @@
 const store = require('../../utils/store.js')
 const intent = require('../../utils/intent.js')
-
-// 微信同声传译插件 (语音识别 + 合成)。插件需在 mp 后台「插件」里添加后才可用。
-let SI = null
-try { SI = requirePlugin('WechatSI') } catch (e) { SI = null }
+const asr = require('../../utils/asr.js')
 
 Page({
   data: {
     text: '',
     recording: false,
-    voiceReady: false,
+    voiceReady: true,
     log: [], // {role:'user'|'bot', text, candidates?, pending?}
     busy: false,
   },
   onLoad() {
-    this.setData({ voiceReady: !!SI })
-    if (SI) {
-      this.rm = SI.getRecordRecognitionManager()
-      this.rm.onRecognize = (res) => { if (res.result) this.setData({ text: res.result }) }
-      this.rm.onStop = (res) => {
-        this.setData({ recording: false })
-        const t = (res && res.result) || this.data.text
-        if (t) { this.setData({ text: t }); this.run(t) }
-      }
-      this.rm.onError = () => { this.setData({ recording: false }) }
-    }
+    this.rm = wx.getRecorderManager()
+    this.rm.onStop((res) => {
+      this.setData({ recording: false })
+      if (res && res.tempFilePath) this._transcribe(res.tempFilePath)
+    })
+    this.rm.onError(() => {
+      this.setData({ recording: false })
+      wx.showToast({ title: '录音出错', icon: 'none' })
+    })
   },
   onInput(e) { this.setData({ text: e.detail.value }) },
 
   startVoice() {
-    if (!SI || !this.rm) { wx.showToast({ title: '未启用同声传译插件', icon: 'none' }); return }
-    this.setData({ recording: true, text: '' })
-    this.rm.start({ lang: 'zh_CN' })
+    this.setData({ recording: true, text: '录音中…' })
+    this.rm.start({ duration: 60000, format: 'mp3', sampleRate: 16000, numberOfChannels: 1 })
   },
   stopVoice() {
-    if (this.rm) this.rm.stop()
+    if (this.data.recording) this.rm.stop()
+  },
+
+  async _transcribe(filePath) {
+    const s = store.getSettings()
+    if (!s.llm || !s.llm.base_url) {
+      wx.showToast({ title: '请先在设置配置 LLM', icon: 'none' })
+      this.setData({ text: '' })
+      return
+    }
+    this.setData({ text: '识别中…', busy: true })
+    let text
+    try {
+      text = await asr.transcribe(s.llm, filePath)
+    } catch (e) {
+      this.setData({ busy: false, text: '' })
+      wx.showToast({ title: '语音识别: ' + (e.message || ''), icon: 'none', duration: 3000 })
+      return
+    }
+    if (text) {
+      this.setData({ text })
+      this.run(text)
+    } else {
+      this.setData({ busy: false, text: '' })
+    }
   },
 
   send() {
@@ -55,7 +73,6 @@ Page({
       const threshold = (s.voice && s.voice.confidence_threshold) || 0.5
       const r = intent.executeIntent(text, parsed, threshold)
       this._push('bot', r.speech, r)
-      this._speak(r.speech)
     } catch (e) {
       this._push('bot', '出错了: ' + (e.message || e))
     } finally {
@@ -68,12 +85,10 @@ Page({
     const entry = this.data.log[idx]
     if (!entry || !entry.pending) return
     const r = intent.confirmAction(entry.pending)
-    // 标记原条目已处理
     const log = this.data.log.slice()
     log[idx] = Object.assign({}, entry, { pending: null })
     this.setData({ log })
     this._push('bot', r.speech, r)
-    this._speak(r.speech)
   },
   cancel(e) {
     const idx = e.currentTarget.dataset.idx
@@ -94,25 +109,5 @@ Page({
       pending: extra.needs_confirmation ? extra.pending : null,
     } : {})
     this.setData({ log: this.data.log.concat(entry) })
-  },
-  _speak(text) {
-    if (!SI || !text) return
-    try {
-      SI.textToSpeech({
-        lang: 'zh_CN', tts: true, content: text,
-        success: (res) => {
-          // 复用单个 InnerAudioContext, 避免重复创建泄漏 (微信对并发上下文有上限)。
-          if (!this._audio) {
-            this._audio = wx.createInnerAudioContext()
-            this._audio.onError(() => {})
-          }
-          this._audio.src = res.filename
-          this._audio.play()
-        },
-      })
-    } catch (e) { /* TTS 失败不影响功能 */ }
-  },
-  onUnload() {
-    if (this._audio) { try { this._audio.destroy() } catch (e) {} this._audio = null }
   },
 })
