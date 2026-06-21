@@ -209,7 +209,9 @@ async function onFilePicked(ev) {
       </div>
     </section>
 
-    <ItemEditor v-if="showNew" :locations="locations" @cancel="showNew=false" @save="(p) => saveItem(p, null)" />
+    <ItemEditor v-if="showNew" :locations="locations"
+      :default-location-id="selectedLocId && selectedLocId > 0 ? selectedLocId : null"
+      @cancel="showNew=false" @save="(p) => saveItem(p, null)" />
     <ItemEditor v-if="editing" :item="editing" :locations="locations"
       @cancel="editing=null" @save="(p) => saveItem(p, editing.id)" />
   </div>

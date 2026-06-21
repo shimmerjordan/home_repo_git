@@ -1,7 +1,7 @@
 <script setup>
 import { ref, watch } from 'vue'
 
-const props = defineProps({ item: Object, locations: Array })
+const props = defineProps({ item: Object, locations: Array, defaultLocationId: { type: Number, default: null } })
 const emit = defineEmits(['cancel', 'save'])
 
 const form = ref({
@@ -11,7 +11,11 @@ const form = ref({
 })
 
 watch(() => props.item, (v) => {
-  if (v) form.value = { ...v }
+  if (v) {
+    form.value = { ...v }
+  } else {
+    form.value.location_id = props.defaultLocationId ?? null
+  }
 }, { immediate: true })
 
 function submit() {

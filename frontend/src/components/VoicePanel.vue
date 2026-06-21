@@ -207,7 +207,13 @@ function timeAgo(iso) {
   return `${d} 天前`
 }
 
-onMounted(() => { loadRecent(); loadScene(); loadPending(); loadDepleted() })
+let _pollTimer = null
+onMounted(() => {
+  loadRecent(); loadScene(); loadPending(); loadDepleted()
+  // Poll every 30 s so Feishu/bot-created transactions appear without a manual refresh.
+  _pollTimer = setInterval(() => { loadRecent(); loadPending() }, 30_000)
+})
+onBeforeUnmount(() => { if (_pollTimer) { clearInterval(_pollTimer); _pollTimer = null } })
 watch(() => props.refreshKey, () => { loadRecent(); loadScene(); loadPending(); loadDepleted() })
 
 // When the user explicitly picks a candidate via "选这个", we must NOT let the
