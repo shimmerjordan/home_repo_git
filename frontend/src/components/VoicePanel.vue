@@ -1,11 +1,18 @@
 <script setup>
-import { ref, computed, watch, toRef, onMounted, onBeforeUnmount, nextTick } from 'vue'
+import { ref, computed, watch, toRef, onMounted, onBeforeUnmount, nextTick, defineAsyncComponent, h } from 'vue'
 import { api } from '../api'
 import { useVoice } from '../composables/useVoice'
 import { useAudioMeter } from '../composables/useAudioMeter'
 import Waveform from './Waveform.vue'
-import Scene3D from './Scene3D.vue'
 import { isLowEndDevice } from '../composables/sceneLayout'
+
+// three.js (~600 KB) is only pulled in through Scene3D, and here it renders solely once a
+// saved 3D layout exists. Load it on demand so the default voice view stays light.
+const Scene3D = defineAsyncComponent({
+  loader: () => import('./Scene3D.vue'),
+  loadingComponent: () => h('div', { class: 'py-16 text-center text-sm text-slate-400' }, '正在载入 3D 模块…'),
+  delay: 150,
+})
 
 // Persisted 3D quality preference shared with BuildingPanel via localStorage.
 const LQ_KEY = 'storage.scene3d.lowQuality'

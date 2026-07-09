@@ -1,5 +1,5 @@
 <script setup>
-import { ref, watch, onMounted, onBeforeUnmount } from 'vue'
+import { ref, watch, onMounted, onBeforeUnmount, defineAsyncComponent, h } from 'vue'
 import VoicePanel from './components/VoicePanel.vue'
 import ItemList from './components/ItemList.vue'
 import LocationManager from './components/LocationManager.vue'
@@ -7,9 +7,16 @@ import SettingsPanel from './components/SettingsPanel.vue'
 import TransactionFeed from './components/TransactionFeed.vue'
 import LogsPanel from './components/LogsPanel.vue'
 import BackupPanel from './components/BackupPanel.vue'
-import BuildingPanel from './components/BuildingPanel.vue'
 import AuditPanel from './components/AuditPanel.vue'
 import { api } from './api'
+
+// The 3D builder drags in three.js + PlanEditor (~600 KB) that no other tab needs. Load it
+// only when the 3D tab is first opened; <keep-alive> then preserves its scene across tab switches.
+const BuildingPanel = defineAsyncComponent({
+  loader: () => import('./components/BuildingPanel.vue'),
+  loadingComponent: () => h('div', { class: 'card p-10 text-center text-sm text-slate-400' }, '正在载入 3D 模块…'),
+  delay: 150,
+})
 
 // Tab state lives in the URL hash (#tab=items) so refreshing the page or sharing
 // a link keeps the user on the same view. Hash routing is enough — no full router
@@ -115,15 +122,107 @@ const tabs = [
   { id: 'backup', label: '备份', icon: '☁' },
   { id: 'settings', label: '设置', icon: '⚙' },
 ]
+
+// --- Header ambient point-cloud: a quiet constellation behind the title bar.
+// Contained to the header, low-opacity, pointer-reactive — a design accent, not page noise.
+// Skips animation for reduced-motion users and pauses when the tab is hidden.
+const bgCanvas = ref(null)
+let _pfCleanup = null
+function initParticleField() {
+  const canvas = bgCanvas.value
+  if (!canvas) return
+  const host = canvas.parentElement
+  const ctx = canvas.getContext('2d')
+  if (!ctx) return
+  const reduce = window.matchMedia && window.matchMedia('(prefers-reduced-motion: reduce)').matches
+  const dpr = Math.min(2, window.devicePixelRatio || 1)
+  let W = 0, H = 0, parts = [], raf = 0, running = true
+  const pointer = { x: -999, y: -999, on: false }
+
+  function resize() {
+    W = host.clientWidth; H = host.clientHeight
+    if (!W || !H) return
+    canvas.width = W * dpr; canvas.height = H * dpr
+    canvas.style.width = W + 'px'; canvas.style.height = H + 'px'
+    ctx.setTransform(dpr, 0, 0, dpr, 0, 0)
+    const target = Math.max(12, Math.min(46, Math.round(W / 34)))
+    if (parts.length !== target) {
+      parts = Array.from({ length: target }, () => ({
+        x: Math.random() * W, y: Math.random() * H,
+        vx: (Math.random() * 2 - 1) * 0.14, vy: (Math.random() * 2 - 1) * 0.14,
+        r: 0.8 + Math.random() * 1.4, a: 0.25 + Math.random() * 0.4,
+      }))
+    }
+    if (reduce) draw()
+  }
+  function step() {
+    for (const p of parts) {
+      p.x += p.vx; p.y += p.vy
+      if (p.x < 0 || p.x > W) p.vx *= -1
+      if (p.y < 0 || p.y > H) p.vy *= -1
+      if (pointer.on) {
+        const dx = p.x - pointer.x, dy = p.y - pointer.y, d = Math.hypot(dx, dy)
+        if (d < 90 && d > 1) { const f = (1 - d / 90) * 0.4; p.x += (dx / d) * f; p.y += (dy / d) * f }
+      }
+    }
+    draw()
+    if (running) raf = requestAnimationFrame(step)
+  }
+  function draw() {
+    ctx.clearRect(0, 0, W, H)
+    for (let i = 0; i < parts.length; i++) {
+      const a = parts[i]
+      for (let j = i + 1; j < parts.length; j++) {
+        const b = parts[j], d = Math.hypot(a.x - b.x, a.y - b.y)
+        if (d < 108) {
+          ctx.strokeStyle = `rgba(129,140,248,${(1 - d / 108) * 0.12})`
+          ctx.lineWidth = 1; ctx.beginPath(); ctx.moveTo(a.x, a.y); ctx.lineTo(b.x, b.y); ctx.stroke()
+        }
+      }
+      if (pointer.on) {
+        const d = Math.hypot(a.x - pointer.x, a.y - pointer.y)
+        if (d < 132) {
+          ctx.strokeStyle = `rgba(165,180,252,${(1 - d / 132) * 0.22})`
+          ctx.lineWidth = 1; ctx.beginPath(); ctx.moveTo(a.x, a.y); ctx.lineTo(pointer.x, pointer.y); ctx.stroke()
+        }
+      }
+    }
+    for (const p of parts) {
+      ctx.fillStyle = `rgba(165,180,252,${p.a})`
+      ctx.beginPath(); ctx.arc(p.x, p.y, p.r, 0, Math.PI * 2); ctx.fill()
+    }
+  }
+  const onMove = (e) => { const r = host.getBoundingClientRect(); pointer.x = e.clientX - r.left; pointer.y = e.clientY - r.top; pointer.on = true }
+  const onLeave = () => { pointer.on = false; pointer.x = pointer.y = -999 }
+  const onVis = () => {
+    if (document.hidden) { running = false; cancelAnimationFrame(raf) }
+    else if (!reduce && !running) { running = true; raf = requestAnimationFrame(step) }
+  }
+  const ro = new ResizeObserver(resize); ro.observe(host)
+  host.addEventListener('pointermove', onMove)
+  host.addEventListener('pointerleave', onLeave)
+  document.addEventListener('visibilitychange', onVis)
+  resize()
+  if (!reduce) raf = requestAnimationFrame(step)
+  _pfCleanup = () => {
+    running = false; cancelAnimationFrame(raf); ro.disconnect()
+    host.removeEventListener('pointermove', onMove)
+    host.removeEventListener('pointerleave', onLeave)
+    document.removeEventListener('visibilitychange', onVis)
+  }
+}
+onMounted(initParticleField)
+onBeforeUnmount(() => { _pfCleanup?.() })
 </script>
 
 <template>
   <div class="min-h-full flex flex-col bg-slate-100">
     <header
-      class="bg-slate-900 text-white sticky top-0 z-10 border-b border-white/10 shadow-lg shadow-slate-900/20
+      class="relative overflow-hidden bg-slate-900 text-white sticky top-0 z-10 border-b border-white/10 shadow-lg shadow-slate-900/20
              px-3 sm:px-4 pb-2 sm:pb-3"
       style="padding-top: calc(0.5rem + env(safe-area-inset-top));">
-      <div class="flex items-center justify-between gap-2 flex-wrap max-w-7xl mx-auto w-full">
+      <canvas ref="bgCanvas" class="pointer-events-none absolute inset-0 z-0" aria-hidden="true"></canvas>
+      <div class="relative z-[1] flex items-center justify-between gap-2 flex-wrap max-w-7xl mx-auto w-full">
         <div class="flex items-center gap-2.5 shrink-0">
           <span class="grid place-items-center w-8 h-8 rounded-lg bg-indigo-600 text-base leading-none shadow-sm" aria-hidden="true">🏠</span>
           <span class="flex flex-col leading-tight">
@@ -157,7 +256,9 @@ const tabs = [
       <VoicePanel v-show="tab==='voice'" :settings="settings" :refresh-key="refreshKey" @changed="bumpRefresh" />
       <ItemList v-show="tab==='items'" :refresh-key="refreshKey" @changed="bumpRefresh" />
       <LocationManager v-show="tab==='locations'" :refresh-key="refreshKey" @changed="bumpRefresh" />
-      <BuildingPanel v-show="tab==='building'" :refresh-key="refreshKey" @changed="bumpRefresh" />
+      <keep-alive>
+        <BuildingPanel v-if="tab==='building'" :refresh-key="refreshKey" @changed="bumpRefresh" />
+      </keep-alive>
       <TransactionFeed v-show="tab==='log'" :refresh-key="refreshKey" />
       <AuditPanel v-show="tab==='audit'" :refresh-key="refreshKey" />
       <LogsPanel v-show="tab==='logs'" />

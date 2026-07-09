@@ -3,6 +3,7 @@ import { ref, computed, watch, onMounted, onBeforeUnmount, shallowRef } from 'vu
 import * as THREE from 'three'
 import { OrbitControls } from 'three/examples/jsm/controls/OrbitControls.js'
 import { TransformControls } from 'three/examples/jsm/controls/TransformControls.js'
+import { RoomEnvironment } from 'three/examples/jsm/environments/RoomEnvironment.js'
 import { buildWorldMap, catalogFor, defaultChildY, levelY,
          pointInPolygon, describeLocationChain } from '../composables/sceneLayout'
 import { buildPrettyFurniture, hasPrettyMesh } from '../composables/furnitureMesh'
@@ -70,27 +71,139 @@ const raycaster = new THREE.Raycaster()
 const pointer = new THREE.Vector2()
 let pulseTween = null
 
+// Atmosphere extras (disposed alongside the renderer).
+let motes = null, moteState = null, pmrem = null, bgTexture = null
+let lastFrameT = 0
+const prefersReducedMotion = typeof window !== 'undefined' && window.matchMedia
+  && window.matchMedia('(prefers-reduced-motion: reduce)').matches
+
+// Vertical depth gradient for the sky/backdrop — reads richer than a flat fill.
+function makeGradientBackground() {
+  const c = document.createElement('canvas')
+  c.width = 4; c.height = 256
+  const ctx = c.getContext('2d')
+  const g = ctx.createLinearGradient(0, 0, 0, 256)
+  g.addColorStop(0, '#22324f')       // sky
+  g.addColorStop(0.55, '#141f36')
+  g.addColorStop(1, '#0b1220')       // floor haze
+  ctx.fillStyle = g; ctx.fillRect(0, 0, 4, 256)
+  const t = new THREE.CanvasTexture(c)
+  t.colorSpace = THREE.SRGBColorSpace
+  return t
+}
+
+// Dust motes: per-point size / alpha / warm-cool colour, soft round sprite,
+// perspective attenuation. Small + slow + varied = atmosphere, not confetti.
+const MOTE_VERT = `
+  attribute float aSize; attribute float aAlpha; attribute vec3 aColor;
+  varying float vAlpha; varying vec3 vColor;
+  uniform float uPixelRatio; uniform float uSize;
+  void main(){
+    vAlpha = aAlpha; vColor = aColor;
+    vec4 mv = modelViewMatrix * vec4(position, 1.0);
+    gl_PointSize = aSize * uSize * uPixelRatio * (1.0 / max(0.1, -mv.z));
+    gl_Position = projectionMatrix * mv;
+  }`
+const MOTE_FRAG = `
+  varying float vAlpha; varying vec3 vColor;
+  void main(){
+    float d = length(gl_PointCoord - vec2(0.5));
+    float a = smoothstep(0.5, 0.05, d);
+    if (a <= 0.0) discard;
+    gl_FragColor = vec4(vColor, a * vAlpha);
+  }`
+
+function buildMotes(count) {
+  const pos = new Float32Array(count * 3)
+  const col = new Float32Array(count * 3)
+  const size = new Float32Array(count)
+  const alpha = new Float32Array(count)
+  const vy = new Float32Array(count)
+  const phase = new Float32Array(count)
+  const warm = [1.0, 0.88, 0.62], cool = [0.70, 0.80, 1.0]
+  const R = 24
+  for (let i = 0; i < count; i++) {
+    pos[i*3]   = (Math.random()*2 - 1) * R
+    pos[i*3+1] = Math.random() * 15
+    pos[i*3+2] = (Math.random()*2 - 1) * R
+    const mix = Math.random()
+    for (let k = 0; k < 3; k++) col[i*3+k] = warm[k]*(1-mix) + cool[k]*mix
+    size[i]  = 0.5 + Math.random()*2.2
+    alpha[i] = 0.12 + Math.random()*0.5
+    vy[i]    = 0.06 + Math.random()*0.28
+    phase[i] = Math.random()*Math.PI*2
+  }
+  const geo = new THREE.BufferGeometry()
+  geo.setAttribute('position', new THREE.BufferAttribute(pos, 3))
+  geo.setAttribute('aColor', new THREE.BufferAttribute(col, 3))
+  geo.setAttribute('aSize', new THREE.BufferAttribute(size, 1))
+  geo.setAttribute('aAlpha', new THREE.BufferAttribute(alpha, 1))
+  const mat = new THREE.ShaderMaterial({
+    vertexShader: MOTE_VERT, fragmentShader: MOTE_FRAG,
+    uniforms: {
+      uPixelRatio: { value: Math.min(2, window.devicePixelRatio || 1) },
+      uSize: { value: 26 },
+    },
+    transparent: true, depthWrite: false, blending: THREE.NormalBlending,
+  })
+  const points = new THREE.Points(geo, mat)
+  points.frustumCulled = false
+  points.renderOrder = 3
+  return { points, pos, vy, phase, count, geo, mat }
+}
+
+function updateMotes(dt, t) {
+  if (!moteState) return
+  const { pos, vy, phase, count, geo } = moteState
+  for (let i = 0; i < count; i++) {
+    let y = pos[i*3+1] + vy[i] * dt
+    if (y > 15.5) { y = -0.5; pos[i*3] = (Math.random()*2-1)*24; pos[i*3+2] = (Math.random()*2-1)*24 }
+    pos[i*3+1] = y
+    // sin*dt integrates to a bounded oscillation, so x drifts within a small band.
+    pos[i*3] += Math.sin(t*0.25 + phase[i]) * 0.06 * dt
+  }
+  geo.attributes.position.needsUpdate = true
+}
+
+function disposeExtras() {
+  if (motes) { scene?.remove(motes); moteState?.geo.dispose(); moteState?.mat.dispose() }
+  motes = null; moteState = null
+  if (pmrem) { pmrem.dispose(); pmrem = null }
+  if (bgTexture) { bgTexture.dispose(); bgTexture = null }
+  lastFrameT = 0
+}
+
 function init() {
   scene = new THREE.Scene()
-  // Soft sky gradient via fog + a colored background gives a warmer look than flat dark.
-  scene.background = new THREE.Color(0x14213d)
-  scene.fog = new THREE.Fog(0x14213d, 30, 80)
+  // Vertical gradient backdrop + depth fog toward the floor haze colour for a warmer look.
+  bgTexture = makeGradientBackground()
+  scene.background = bgTexture
+  scene.fog = new THREE.Fog(0x0b1220, 34, 92)
 
   const w = container.value.clientWidth || 600
   const h = container.value.clientHeight || (typeof props.height === 'number' ? props.height : 480)
   camera = new THREE.PerspectiveCamera(45, w / h, 0.05, 500)
   camera.position.set(8, 9, 10)
 
-  renderer = new THREE.WebGLRenderer({ antialias: !props.lowQuality })
+  renderer = new THREE.WebGLRenderer({ antialias: !props.lowQuality, powerPreference: 'high-performance' })
   renderer.setSize(w, h)
-  // Cap pixel ratio in low-quality mode to keep iPad Safari smooth.
-  renderer.setPixelRatio(props.lowQuality ? Math.min(1.5, window.devicePixelRatio) : window.devicePixelRatio)
+  // Cap pixel ratio: full-res retina/4K is a big fill-rate cost for little gain. 2x is the
+  // sweet spot on high quality; 1.5x keeps iPad Safari smooth in low-quality mode.
+  renderer.setPixelRatio(Math.min(props.lowQuality ? 1.5 : 2, window.devicePixelRatio || 1))
   renderer.shadowMap.enabled = !props.lowQuality
   renderer.shadowMap.type = THREE.PCFSoftShadowMap
   renderer.outputColorSpace = THREE.SRGBColorSpace
   renderer.toneMapping = THREE.ACESFilmicToneMapping
   renderer.toneMappingExposure = 1.05
   container.value.appendChild(renderer.domElement)
+
+  // Image-based lighting from a neutral room: gives MeshStandardMaterials real
+  // specular / reflection response — the single biggest jump in material quality,
+  // at a one-time prefilter cost and zero per-frame overhead.
+  pmrem = new THREE.PMREMGenerator(renderer)
+  const envRT = pmrem.fromScene(new RoomEnvironment(), 0.04)
+  scene.environment = envRT.texture
+  scene.environmentIntensity = 0.55
 
   controls = new OrbitControls(camera, renderer.domElement)
   controls.enableDamping = true
@@ -130,6 +243,14 @@ function init() {
   const grid = new THREE.GridHelper(40, 40, 0x334155, 0x1e293b)
   grid.position.y = -0.01
   scene.add(grid)
+
+  // Floating dust motes for atmospheric depth. Fewer in low-quality mode; none for
+  // users who asked the OS to reduce motion.
+  if (!prefersReducedMotion) {
+    moteState = buildMotes(props.lowQuality ? 200 : 460)
+    motes = moteState.points
+    scene.add(motes)
+  }
 
   if (props.editable) {
     transformControls = new TransformControls(camera, renderer.domElement)
@@ -428,7 +549,11 @@ function fitAll(animate = true) {
 
 function loop() {
   raf = requestAnimationFrame(loop)
+  const now = performance.now()
+  const dt = lastFrameT ? Math.min(0.05, (now - lastFrameT) / 1000) : 0.016
+  lastFrameT = now
   controls.update()
+  if (moteState) updateMotes(dt, now / 1000)
   if (pulseTween) pulseTween()
   renderer.render(scene, camera)
 }
@@ -905,6 +1030,7 @@ onBeforeUnmount(() => {
   resizeObserver?.disconnect()
   controls?.dispose()
   transformControls?.dispose?.()
+  disposeExtras()
   if (renderer) { renderer.dispose(); renderer.domElement.remove() }
 })
 
@@ -915,6 +1041,7 @@ watch(() => props.lowQuality, () => {
   resizeObserver?.disconnect()
   controls?.dispose()
   transformControls?.dispose?.()
+  disposeExtras()
   if (renderer) { renderer.dispose(); renderer.domElement.remove() }
   // Reset module-locals so re-init starts cleanly.
   scene = camera = renderer = controls = transformControls = null
