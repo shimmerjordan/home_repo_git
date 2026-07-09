@@ -118,25 +118,36 @@ const tabs = [
 </script>
 
 <template>
-  <div class="min-h-full flex flex-col">
-    <header class="bg-slate-900 text-white px-3 py-2 sm:px-4 sm:py-3 sticky top-0 z-10">
-      <div class="flex items-center justify-between gap-2 flex-wrap">
-        <div class="font-semibold flex items-center gap-2 shrink-0">
-          🏠 语音仓储管家
+  <div class="min-h-full flex flex-col bg-slate-100">
+    <header
+      class="bg-slate-900 text-white sticky top-0 z-10 border-b border-white/10 shadow-lg shadow-slate-900/20
+             px-3 sm:px-4 pb-2 sm:pb-3"
+      style="padding-top: calc(0.5rem + env(safe-area-inset-top));">
+      <div class="flex items-center justify-between gap-2 flex-wrap max-w-7xl mx-auto w-full">
+        <div class="flex items-center gap-2.5 shrink-0">
+          <span class="grid place-items-center w-8 h-8 rounded-lg bg-indigo-600 text-base leading-none shadow-sm" aria-hidden="true">🏠</span>
+          <span class="flex flex-col leading-tight">
+            <span class="font-semibold tracking-tight">语音仓储管家</span>
+            <span class="text-[10px] text-slate-400 hidden sm:block">本地 NAS · 私有存储</span>
+          </span>
           <button @click="toggleFullscreen"
-            :class="['ml-1 px-2 py-1 rounded text-xs',
-                     exitArmed ? 'bg-amber-500 text-slate-900' : 'bg-white/10 hover:bg-white/20']"
+            :class="['ml-1 px-2 py-1 rounded-md text-xs transition-colors',
+                     exitArmed ? 'bg-amber-500 text-slate-900 font-medium' : 'bg-white/10 hover:bg-white/20 text-slate-200']"
             :title="isFullscreen ? (exitArmed ? '再点一次退出全屏' : '退出全屏需要点两下') : '全屏显示'">
             {{ isFullscreen ? (exitArmed ? '再点退出' : '⤡') : '⤢' }}
           </button>
         </div>
         <!-- Horizontal scroll on iPad portrait so tabs always fit; labels collapse to icons on narrow widths. -->
-        <nav class="flex gap-1 text-sm overflow-x-auto -mx-1 px-1 no-scrollbar">
+        <nav class="flex gap-1 text-sm overflow-x-auto -mx-1 px-1 py-0.5 no-scrollbar" aria-label="主导航">
           <button v-for="t in tabs" :key="t.id"
-            :class="['px-2.5 py-1 rounded shrink-0', tab===t.id ? 'bg-white text-slate-900' : 'hover:bg-slate-800']"
+            :class="['inline-flex items-center px-2.5 py-1.5 rounded-lg shrink-0 transition-colors duration-150',
+                     tab===t.id
+                       ? 'bg-indigo-600 text-white font-medium shadow-sm'
+                       : 'text-slate-300 hover:bg-white/10 hover:text-white']"
+            :aria-current="tab===t.id ? 'page' : undefined"
             @click="tab=t.id">
-            <span>{{ t.icon }}</span>
-            <span class="hidden sm:inline ml-1">{{ t.label }}</span>
+            <span aria-hidden="true">{{ t.icon }}</span>
+            <span class="hidden sm:inline ml-1.5">{{ t.label }}</span>
           </button>
         </nav>
       </div>
