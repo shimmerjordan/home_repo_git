@@ -50,15 +50,43 @@ class LLMClient:
         self.cfg = cfg
 
     @property
+    def _is_anthropic(self) -> bool:
+        return getattr(self.cfg, "api_format", "openai") == "anthropic"
+
+    @property
     def _headers(self) -> dict[str, str]:
         h = {"Content-Type": "application/json"}
-        if self.cfg.api_key:
+        if self._is_anthropic:
+            h["anthropic-version"] = "2023-06-01"
+            if self.cfg.api_key:
+                # 官方要求 x-api-key; cc-trans 等网关同时接受 x-api-key 和 Bearer。
+                h["x-api-key"] = self.cfg.api_key
+        elif self.cfg.api_key:
             h["Authorization"] = f"Bearer {self.cfg.api_key}"
         return h
 
     @property
     def _url(self) -> str:
-        return self.cfg.base_url.rstrip("/") + "/chat/completions"
+        base = self.cfg.base_url.rstrip("/")
+        if self._is_anthropic:
+            # 用户可能填 https://api.anthropic.com 或 http://nas:8787/v1 — 统一成 /v1/messages。
+            if base.endswith("/v1"):
+                base = base[: -len("/v1")].rstrip("/")
+            return base + "/v1/messages"
+        return base + "/chat/completions"
+
+    @staticmethod
+    def _tools_to_anthropic(tools: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        """OpenAI function-tools → Anthropic tool schema."""
+        out = []
+        for t in tools:
+            fn = t.get("function") or {}
+            out.append({
+                "name": fn.get("name", ""),
+                "description": fn.get("description", ""),
+                "input_schema": fn.get("parameters") or {"type": "object"},
+            })
+        return out
 
     async def chat(
         self,
@@ -68,21 +96,41 @@ class LLMClient:
         force_json: bool = False,
     ) -> dict[str, Any]:
         """Return a normalized result: {content: str, tool_calls: list[{name, arguments(dict)}]}."""
-        payload: dict[str, Any] = {
-            "model": self.cfg.model,
-            "messages": messages,
-            "temperature": self.cfg.temperature,
-        }
-        if getattr(self.cfg, "max_tokens", 0):
-            payload["max_tokens"] = int(self.cfg.max_tokens)
-
         use_tools = bool(tools) and self.cfg.supports_tools
-        if use_tools:
-            payload["tools"] = tools
-            payload["tool_choice"] = "auto"
-        elif force_json:
-            # Many OpenAI-compatible servers honor this; safe to set even if ignored.
-            payload["response_format"] = {"type": "json_object"}
+        if self._is_anthropic:
+            # Anthropic /v1/messages: system 是顶层字段, max_tokens 必填, temperature ≤ 1。
+            system_parts = [m.get("content") or "" for m in messages if m.get("role") == "system"]
+            msgs = [
+                {"role": m["role"], "content": m.get("content") or ""}
+                for m in messages
+                if m.get("role") in ("user", "assistant")
+            ]
+            payload = {
+                "model": self.cfg.model,
+                "messages": msgs,
+                "max_tokens": int(getattr(self.cfg, "max_tokens", 0) or 1024),
+                "temperature": min(self.cfg.temperature, 1.0),
+            }
+            if system_parts:
+                payload["system"] = "\n\n".join(p for p in system_parts if p)
+            if use_tools:
+                payload["tools"] = self._tools_to_anthropic(tools)
+                payload["tool_choice"] = {"type": "auto"}
+            # force_json: Anthropic 没有 response_format, 依赖 prompt 约束 + _strip_json。
+        else:
+            payload = {
+                "model": self.cfg.model,
+                "messages": messages,
+                "temperature": self.cfg.temperature,
+            }
+            if getattr(self.cfg, "max_tokens", 0):
+                payload["max_tokens"] = int(self.cfg.max_tokens)
+            if use_tools:
+                payload["tools"] = tools
+                payload["tool_choice"] = "auto"
+            elif force_json:
+                # Many OpenAI-compatible servers honor this; safe to set even if ignored.
+                payload["response_format"] = {"type": "json_object"}
 
         log.debug("LLM request → %s model=%s tools=%s msgs=%d",
                   self._url, self.cfg.model, use_tools, len(messages))
@@ -101,6 +149,26 @@ class LLMClient:
 
         data = resp.json()
         usage = data.get("usage") or {}
+        if self._is_anthropic:
+            log.info("LLM ok %d %.0fms tokens=%s",
+                     resp.status_code, elapsed_ms,
+                     f"{usage.get('input_tokens','?')}/{usage.get('output_tokens','?')}")
+            blocks = data.get("content")
+            if not isinstance(blocks, list):
+                raise LLMError(f"Unexpected LLM response shape: {data}")
+            content = ""
+            tool_calls_norm: list[dict[str, Any]] = []
+            for block in blocks:
+                btype = block.get("type")
+                if btype == "text":
+                    content += block.get("text") or ""
+                elif btype == "tool_use":
+                    tool_calls_norm.append({
+                        "name": block.get("name", ""),
+                        "arguments": block.get("input") or {},
+                    })
+            return {"content": content, "tool_calls": tool_calls_norm, "raw": data}
+
         log.info("LLM ok %d %.0fms tokens=%s",
                  resp.status_code, elapsed_ms,
                  f"{usage.get('prompt_tokens','?')}/{usage.get('completion_tokens','?')}")
@@ -111,7 +179,7 @@ class LLMClient:
             raise LLMError(f"Unexpected LLM response shape: {data}") from exc
 
         content = message.get("content") or ""
-        tool_calls_norm: list[dict[str, Any]] = []
+        tool_calls_norm = []
 
         for tc in message.get("tool_calls") or []:
             fn = tc.get("function", {})

@@ -156,7 +156,7 @@ async def webhook(request: Request, db: Session = Depends(get_db)):
     # SILENT EXECUTION: force confidence high so execute_intent doesn't park
     # mutating actions behind "needs_confirmation". The user explicitly asked
     # for no-confirmation flow on DingTalk.
-    if parsed.get("intent") in ("take_out", "put_in", "consume", "create_item"):
+    if parsed.get("intent") in ("take_out", "put_in", "consume", "create_item") or parsed.get("operations"):
         parsed["confidence"] = max(parsed.get("confidence", 0.0), 1.0)
     result = execute_intent(db, text, parsed, cfg)
     app_log.info("dingtalk.done intent=%s exec=%s tx=%s",

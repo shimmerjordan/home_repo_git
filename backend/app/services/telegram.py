@@ -128,7 +128,7 @@ async def _handle_update(update: dict[str, Any], cfg) -> None:
         parsed = out["parsed"]
         # Silent execution — DingTalk and Telegram share the policy: no UI to
         # confirm, so force-execute mutating intents that the LLM picked.
-        if parsed.get("intent") in ("take_out", "put_in", "consume", "create_item"):
+        if parsed.get("intent") in ("take_out", "put_in", "consume", "create_item") or parsed.get("operations"):
             parsed["confidence"] = max(parsed.get("confidence", 0.0), 1.0)
         result = execute_intent(db, text, parsed, cfg)
         await _send_message(tg_cfg.bot_token, chat_id, _format_reply(result))

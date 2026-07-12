@@ -49,6 +49,13 @@ SYSTEM_PROMPT = """你是家庭仓储管家的语义解析器, 同时要给出�
    - 新增成功: "记下啦, 充电宝放在卧室床头柜了"
    - 不确定: "我不太确定, 是想找充电宝吗"
 
+批量操作 (重要):
+- 用户一句话里可能包含**多个物品或多个动作**(如 "我消耗了一瓶水和两片药"、"拿了卷尺,顺便放回了螺丝刀"、"用完了牙膏、洗发水和纸巾")
+- 这种情况必须把**每一个操作**都列进 operations 数组, 一条不落, 绝不能只处理第一个
+- operations 里每条包含: intent(take_out/put_in/consume/create_item) / item_id(库存里有就填) / item_name / location_id(可选) / quantity
+- 顶层 intent 填第一个操作的意图, speech 一句话总结全部操作 (如 "好的, 已记录用完1瓶水和2片药")
+- 只有一个操作时 operations 留空, 继续用顶层字段
+
 注意:
 - "我刚拿了X"对应 take_out (借出, 待归位); "我用完了X" / "X 喝完了" / "扔了X" 对应 consume (永久减库存, 不待归位)
 - "我把X放在Y了"对应 put_in (归位; 如果有 take_out 待归位的同名物品, 自动抵消)
@@ -68,6 +75,9 @@ INTENT_SCHEMA_HINT = """{
   "location_id": null,            // put_in / create_item 可用
   "quantity": 1,
   "candidates": [123, 456],       // 备选 item_id, 当不确定时给出
+  "operations": [                 // 批量操作时列出全部, 单操作留空
+    {"intent": "consume", "item_id": 12, "item_name": "矿泉水", "location_id": null, "quantity": 1}
+  ],
   "reasoning": "string (一句解释)"
 }"""
 
@@ -96,6 +106,25 @@ TOOLS = [
                         "items": {"type": "integer"},
                         "default": [],
                     },
+                    "operations": {
+                        "type": "array",
+                        "description": "批量操作时列出全部操作 (一句话含多个物品/动作); 单操作留空用顶层字段",
+                        "items": {
+                            "type": "object",
+                            "properties": {
+                                "intent": {
+                                    "type": "string",
+                                    "enum": ["take_out", "put_in", "consume", "create_item"],
+                                },
+                                "item_id": {"type": ["integer", "null"]},
+                                "item_name": {"type": ["string", "null"]},
+                                "location_id": {"type": ["integer", "null"]},
+                                "quantity": {"type": "integer", "default": 1},
+                            },
+                            "required": ["intent"],
+                        },
+                        "default": [],
+                    },
                     "recommendations": {
                         "type": "array",
                         "items": {
@@ -115,6 +144,38 @@ TOOLS = [
         },
     }
 ]
+
+
+MUTATION_INTENTS = {"take_out", "put_in", "consume", "create_item"}
+
+
+def _op_from_parsed(parsed: dict[str, Any]) -> dict[str, Any] | None:
+    """Extract a single operation dict from a top-level parsed intent (or None)."""
+    if parsed.get("intent") not in MUTATION_INTENTS:
+        return None
+    return {
+        "intent": parsed["intent"],
+        "item_id": parsed.get("item_id"),
+        "item_name": parsed.get("item_name"),
+        "location_id": parsed.get("location_id"),
+        "quantity": int(parsed.get("quantity") or 1),
+    }
+
+
+def _normalize_operations(parsed: dict[str, Any]) -> list[dict[str, Any]]:
+    """Coerce parsed['operations'] into a clean list of mutation ops."""
+    ops: list[dict[str, Any]] = []
+    for raw in parsed.get("operations") or []:
+        if not isinstance(raw, dict) or raw.get("intent") not in MUTATION_INTENTS:
+            continue
+        ops.append({
+            "intent": raw["intent"],
+            "item_id": raw.get("item_id"),
+            "item_name": raw.get("item_name"),
+            "location_id": raw.get("location_id"),
+            "quantity": max(1, int(raw.get("quantity") or 1)),
+        })
+    return ops
 
 
 async def parse_intent(text: str, db: Session, cfg: AppConfig) -> dict[str, Any]:
@@ -140,7 +201,25 @@ async def parse_intent(text: str, db: Session, cfg: AppConfig) -> dict[str, Any]
     if cfg.llm.supports_tools:
         result = await client.chat(messages, tools=TOOLS)
         if result["tool_calls"]:
-            parsed = result["tool_calls"][0]["arguments"]
+            calls = [tc["arguments"] for tc in result["tool_calls"] if tc.get("arguments")]
+            parsed = calls[0]
+            # Some models emit one submit_intent call per operation instead of
+            # filling the operations array — merge every extra call in, so a
+            # batch utterance ("我消耗了A和B") never silently drops operations.
+            if len(calls) > 1:
+                ops = list(parsed.get("operations") or [])
+                if not ops:
+                    first = _op_from_parsed(parsed)
+                    if first:
+                        ops.append(first)
+                for extra in calls[1:]:
+                    extra_ops = extra.get("operations") or []
+                    if not extra_ops:
+                        one = _op_from_parsed(extra)
+                        extra_ops = [one] if one else []
+                    ops.extend(extra_ops)
+                if ops:
+                    parsed["operations"] = ops
         elif result["content"]:
             # Fallback if model ignored the tool.
             parsed = await client.chat_json(messages, schema_hint=INTENT_SCHEMA_HINT)
@@ -156,7 +235,192 @@ async def parse_intent(text: str, db: Session, cfg: AppConfig) -> dict[str, Any]
     parsed.setdefault("quantity", 1)
     parsed.setdefault("candidates", [])
     parsed.setdefault("recommendations", [])
+    parsed.setdefault("operations", [])
     return {"parsed": parsed, "summary": summary}
+
+
+def _alias_set(aliases_str: str) -> set[str]:
+    return {a.strip().lower()
+            for a in re.split(r"[,/，、;；]", aliases_str or "")
+            if a.strip()}
+
+
+def _find_exact_item(db: Session, name: str) -> models.Item | None:
+    """Exact name/alias match (case-insensitive). Fuzzy matches intentionally ignored."""
+    name_lower = name.lower()
+    for candidate in db.query(models.Item).all():
+        if (candidate.name or "").lower() == name_lower:
+            return candidate
+        if name_lower in _alias_set(candidate.aliases or ""):
+            return candidate
+    return None
+
+
+def _find_item_for_op(db: Session, op: dict[str, Any]) -> models.Item | None:
+    """Resolve one batch operation to an existing item: by id, then by name search."""
+    if op.get("item_id"):
+        item = db.query(models.Item).get(op["item_id"])
+        if item:
+            return item
+    name = (op.get("item_name") or "").strip()
+    if name:
+        matches = search_items(db, name, limit=1)
+        if matches:
+            return matches[0]
+    return None
+
+
+def _apply_stock_op(
+    db: Session, intent: str, item: models.Item, qty: int,
+    loc_id: int | None, note: str = "语音操作",
+) -> models.Transaction:
+    """take_out / consume / put_in on an existing item. Flushes (no commit)."""
+    if intent in ("take_out", "consume"):
+        item.quantity = max(0, (item.quantity or 0) - qty)
+    else:  # put_in
+        item.quantity = (item.quantity or 0) + qty
+        if loc_id:
+            item.location_id = loc_id
+    item.updated_at = datetime.now()
+    tx = models.Transaction(
+        item_id=item.id,
+        action=intent,
+        quantity=qty,
+        location_id=loc_id or item.location_id,
+        note=note,
+    )
+    db.add(tx)
+    db.flush()
+    return tx
+
+
+def _create_or_merge_item(
+    db: Session, name: str, qty: int, loc_id: int | None, note: str = "语音创建",
+) -> tuple[models.Item, models.Transaction, bool]:
+    """Create an item, or merge quantity into an exact name/alias match.
+    Returns (item, tx, merged). Flushes (no commit)."""
+    existing = _find_exact_item(db, name)
+    if existing:
+        existing.quantity = (existing.quantity or 0) + qty
+        existing.updated_at = datetime.now()
+        if loc_id:
+            existing.location_id = loc_id
+        tx = models.Transaction(
+            item_id=existing.id,
+            action="put_in",
+            quantity=qty,
+            location_id=existing.location_id,
+            note=note + "(已合并)",
+        )
+        db.add(tx)
+        db.flush()
+        return existing, tx, True
+    item = models.Item(name=name, location_id=loc_id, quantity=qty)
+    db.add(item)
+    db.flush()
+    tx = models.Transaction(
+        item_id=item.id,
+        action="put_in",
+        quantity=item.quantity,
+        location_id=item.location_id,
+        note=note,
+    )
+    db.add(tx)
+    db.flush()
+    return item, tx, False
+
+
+_OP_VERB = {"take_out": "取出", "put_in": "存入", "consume": "用完", "create_item": "新增"}
+
+
+def _execute_batch(
+    db: Session, parsed: dict[str, Any], ops: list[dict[str, Any]],
+    cfg: AppConfig, base: dict[str, Any],
+) -> dict[str, Any]:
+    """Execute a multi-operation utterance ("我消耗了A和B") atomically-ish:
+    each op resolves + executes independently; one commit at the end."""
+    threshold = cfg.voice.confidence_threshold
+    if base["confidence"] < threshold:
+        base["needs_confirmation"] = True
+        base["pending_action"] = {"intent": "batch", "operations": ops}
+        if not base["speech"]:
+            descs = []
+            for o in ops:
+                name = o.get("item_name")
+                if not name and o.get("item_id"):
+                    it = db.query(models.Item).get(o["item_id"])
+                    name = it.name if it else None
+                descs.append(f"{_OP_VERB[o['intent']]}{name or '物品'}×{o['quantity']}")
+            base["speech"] = f"我不太确定, 要执行这{len(ops)}个操作吗: " + ", ".join(descs)
+        return base
+
+    op_results: list[dict[str, Any]] = []
+    fragments: list[str] = []
+    cand: list[dict[str, Any]] = []
+    for op in ops:
+        intent = op["intent"]
+        qty = op["quantity"]
+        r: dict[str, Any] = {
+            "intent": intent,
+            "item_id": op.get("item_id"),
+            "item_name": op.get("item_name"),
+            "quantity": qty,
+            "executed": False,
+            "transaction_id": None,
+            "speech": "",
+        }
+        item: models.Item | None = None
+        if intent == "create_item":
+            name = (op.get("item_name") or "").strip()
+            if not name:
+                r["speech"] = "有一项缺少物品名称"
+            else:
+                item, tx, merged = _create_or_merge_item(
+                    db, name, qty, op.get("location_id"), note="语音创建(批量)")
+                r.update(item_id=item.id, item_name=item.name,
+                         executed=True, transaction_id=tx.id)
+                if merged:
+                    r["speech"] = f"已存入{item.name}×{qty}(共{item.quantity})"
+                else:
+                    r["speech"] = f"已新增{item.name}×{qty}"
+        else:
+            item = _find_item_for_op(db, op)
+            if not item:
+                r["speech"] = f"没找到{op.get('item_name') or '该物品'}"
+            else:
+                tx = _apply_stock_op(
+                    db, intent, item, qty, op.get("location_id"), note="语音操作(批量)")
+                r.update(item_id=item.id, item_name=item.name,
+                         executed=True, transaction_id=tx.id)
+                if intent == "put_in":
+                    r["speech"] = f"已存入{item.name}×{qty}(共{item.quantity})"
+                else:
+                    r["speech"] = f"已{_OP_VERB[intent]}{item.name}×{qty}(剩{item.quantity})"
+        if r["executed"] and item is not None:
+            cand.append({
+                "item_id": item.id,
+                "item_name": item.name,
+                "location_path": location_path(item.location) if item.location else None,
+                "score": 1.0 - (len(cand) * 0.05),
+            })
+        op_results.append(r)
+        fragments.append(r["speech"])
+    db.commit()
+
+    ok = [r for r in op_results if r["executed"]]
+    failed = [r for r in op_results if not r["executed"]]
+    base["operations"] = op_results
+    base["executed"] = bool(ok)
+    base["transaction_id"] = ok[0]["transaction_id"] if ok else None
+    intents = {o["intent"] for o in ops}
+    base["intent"] = ops[0]["intent"] if len(intents) == 1 else "batch"
+    if cand:
+        base["candidates"] = cand
+    # If anything failed, the LLM's cheerful speech would over-claim — override
+    # with the truthful per-op aggregate.
+    if not base["speech"] or failed:
+        base["speech"] = "; ".join(fragments)
+    return base
 
 
 def _candidate_objects(db: Session, ids: list[int], fallback_query: str) -> list[models.Item]:
@@ -196,8 +460,23 @@ def execute_intent(
         "recommendations": [],
         "executed": False,
         "transaction_id": None,
+        "operations": [],
         "raw": parsed,
     }
+
+    # Batch: one utterance containing several operations ("我消耗了A和B").
+    ops = _normalize_operations(parsed)
+    if len(ops) >= 2:
+        return _execute_batch(db, parsed, ops, cfg, base)
+    if len(ops) == 1:
+        # Model put a single op into the array — fold it into the top-level fields
+        # and continue down the normal single-op path.
+        op = ops[0]
+        intent = base["intent"] = parsed["intent"] = op["intent"]
+        for key in ("item_id", "item_name", "location_id"):
+            if op.get(key) is not None:
+                parsed[key] = op[key]
+        parsed["quantity"] = op["quantity"]
 
     # Build candidate display.
     cand_ids = parsed.get("candidates") or []
@@ -300,62 +579,15 @@ def execute_intent(
         # Exact name or alias match → merge into existing item instead of
         # duplicating. Fuzzy / semantic matches are intentionally ignored here
         # so the user always gets a fresh record unless the name is identical.
-        def _alias_set(aliases_str: str) -> set[str]:
-            return {a.strip().lower()
-                    for a in re.split(r"[,/，、;；]", aliases_str or "")
-                    if a.strip()}
-
-        name_lower = name.lower()
-        existing: models.Item | None = None
-        for candidate in db.query(models.Item).all():
-            if (candidate.name or "").lower() == name_lower:
-                existing = candidate
-                break
-            if name_lower in _alias_set(candidate.aliases or ""):
-                existing = candidate
-                break
-
-        if existing:
-            # Merge: add quantity, optionally update location.
-            existing.quantity = (existing.quantity or 0) + qty
-            existing.updated_at = datetime.now()
-            if loc_id:
-                existing.location_id = loc_id
-            tx = models.Transaction(
-                item_id=existing.id,
-                action="put_in",
-                quantity=qty,
-                location_id=existing.location_id,
-                note="语音创建(已合并)",
-            )
-            db.add(tx)
-            db.commit()
-            db.refresh(tx)
-            base["executed"] = True
-            base["transaction_id"] = tx.id
-            loc_text = location_path(existing.location) if existing.location else "未指定位置"
-            base["speech"] = speech or f"已找到同名物品,已将数量+{qty},现在{existing.name}共{existing.quantity}个,位置:{loc_text}"
+        item, tx, merged = _create_or_merge_item(db, name, qty, loc_id)
+        db.commit()
+        db.refresh(tx)
+        base["executed"] = True
+        base["transaction_id"] = tx.id
+        loc_text = location_path(item.location) if item.location else "未指定位置"
+        if merged:
+            base["speech"] = speech or f"已找到同名物品,已将数量+{qty},现在{item.name}共{item.quantity}个,位置:{loc_text}"
         else:
-            item = models.Item(
-                name=name,
-                location_id=loc_id,
-                quantity=qty,
-            )
-            db.add(item)
-            db.flush()
-            tx = models.Transaction(
-                item_id=item.id,
-                action="put_in",
-                quantity=item.quantity,
-                location_id=item.location_id,
-                note="语音创建",
-            )
-            db.add(tx)
-            db.commit()
-            db.refresh(tx)
-            base["executed"] = True
-            base["transaction_id"] = tx.id
-            loc_text = location_path(item.location) if item.location else "未指定位置"
             base["speech"] = speech or f"记下啦,{name}放在{loc_text}了"
         return base
 
@@ -373,22 +605,7 @@ def execute_intent(
             base["speech"] = "物品不存在了"
             return base
         qty = int(parsed.get("quantity") or 1)
-        loc_id = parsed.get("location_id") or item.location_id
-        if intent == "take_out" or intent == "consume":
-            item.quantity = max(0, (item.quantity or 0) - qty)
-        else:  # put_in
-            item.quantity = (item.quantity or 0) + qty
-            if parsed.get("location_id"):
-                item.location_id = parsed["location_id"]
-        item.updated_at = datetime.now()
-        tx = models.Transaction(
-            item_id=item.id,
-            action=intent,
-            quantity=qty,
-            location_id=loc_id,
-            note="语音操作",
-        )
-        db.add(tx)
+        tx = _apply_stock_op(db, intent, item, qty, parsed.get("location_id"))
         db.commit()
         db.refresh(tx)
         base["executed"] = True

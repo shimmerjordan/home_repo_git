@@ -39,6 +39,7 @@ async def voice_intent(payload: VoiceQuery, db: Session = Depends(get_db)):
             "confidence": 1.0,
             "speech": "",
             "candidates": [],
+            "operations": pa.get("operations") or [],
         }
         return execute_intent(db, text, parsed, cfg)
 

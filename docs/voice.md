@@ -21,13 +21,16 @@
    - LLM 返回 `confidence < threshold` 且是修改性操作(取出/存入)时,先不动数据,弹卡片 + 语音播报问 "是想 X 吗",同样支持口头/按钮二选一
    - 模糊匹配时给候选物品列表,可点 "选这个"
 6. **需求型问答**: "我发烧了家里有什么药" 这种问句会走 `assist` 意图,返回带"用途"列的推荐表,并在 3D 视图里同时高亮所有相关物品
+7. **批量操作**: 一句话包含多个物品/动作时(如 "我消耗了一瓶水和两片药"、"拿了卷尺,顺便放回螺丝刀"),LLM 返回 `operations` 数组,后端逐条执行并汇总播报;部分失败时话术如实说明哪条没找到。低置信度时整批待确认,确认后一次性执行
 
 ## LLM 接入(完全可配置)
 
-- OpenAI 兼容协议,任何提供 `/v1/chat/completions` 的服务都行
-- 内置预设:**OpenAI / 硅基流动 / DeepSeek / Ollama / 智谱 GLM**
-- 运行时改 `base_url` + `api_key` + `model` + `temperature` + `timeout` + `max_tokens`,**无需重启**
-- 自动用 OpenAI 风格 `tool_calls`,模型不支持时降级为 JSON 模式
+- 两种接口格式,设置页可切换:
+  - **OpenAI 兼容**(默认): 任何提供 `/v1/chat/completions` 的服务都行
+  - **Anthropic (Claude)**: `/v1/messages`,支持 Claude 官方 API 和 **cc-trans 反代**(API Key 填 `cct-...` 客户端令牌,Base URL 填 cc-trans 地址如 `http://host.docker.internal:8787`)
+- 内置预设:**OpenAI / 硅基流动 / DeepSeek / Ollama / 智谱 GLM / Claude 官方 / cc-trans**
+- 运行时改 `base_url` + `api_format` + `api_key` + `model` + `temperature` + `timeout` + `max_tokens`,**无需重启**
+- 自动用工具调用(OpenAI `tool_calls` / Anthropic `tool_use`),模型不支持时降级为 JSON 模式
 - "测试连接"按钮一键验证
 
 ### 加速 Tips

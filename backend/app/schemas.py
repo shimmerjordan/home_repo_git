@@ -123,8 +123,19 @@ class IntentRecommendation(BaseModel):
     purpose: str = ""
 
 
+class IntentOperationResult(BaseModel):
+    """Per-operation outcome when one utterance contains multiple operations."""
+    intent: str  # take_out / put_in / consume / create_item
+    item_id: Optional[int] = None
+    item_name: Optional[str] = None
+    quantity: int = 1
+    executed: bool = False
+    transaction_id: Optional[int] = None
+    speech: str = ""
+
+
 class IntentResult(BaseModel):
-    intent: str  # find / take_out / put_in / list / assist / unknown / clarify
+    intent: str  # find / take_out / put_in / list / assist / unknown / clarify / batch
     confidence: float
     speech: str  # what to read out loud to the user
     needs_confirmation: bool = False
@@ -133,6 +144,7 @@ class IntentResult(BaseModel):
     recommendations: list[IntentRecommendation] = []
     executed: bool = False
     transaction_id: Optional[int] = None
+    operations: list[IntentOperationResult] = []  # batch utterances: one entry per op
     raw: Optional[dict[str, Any]] = None
 
 
@@ -140,6 +152,7 @@ class IntentResult(BaseModel):
 
 class LLMConfigPatch(BaseModel):
     base_url: Optional[str] = None
+    api_format: Optional[str] = None  # "openai" | "anthropic"
     api_key: Optional[str] = None
     model: Optional[str] = None
     temperature: Optional[float] = None

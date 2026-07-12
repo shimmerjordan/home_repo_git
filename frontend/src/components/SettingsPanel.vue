@@ -20,11 +20,13 @@ const fsUsersInput = ref('')
 const origin = typeof window !== 'undefined' ? window.location.origin : ''
 
 const presets = [
-  { label: 'OpenAI', base_url: 'https://api.openai.com/v1', model: 'gpt-4o-mini', supports_tools: true },
-  { label: '硅基流动 SiliconFlow', base_url: 'https://api.siliconflow.cn/v1', model: 'Qwen/Qwen2.5-7B-Instruct', supports_tools: true },
-  { label: 'DeepSeek', base_url: 'https://api.deepseek.com/v1', model: 'deepseek-chat', supports_tools: true },
-  { label: 'Ollama (本地)', base_url: 'http://host.docker.internal:11434/v1', model: 'qwen2.5:7b-instruct', supports_tools: false },
-  { label: '智谱 GLM', base_url: 'https://open.bigmodel.cn/api/paas/v4', model: 'glm-4-flash', supports_tools: true },
+  { label: 'OpenAI', base_url: 'https://api.openai.com/v1', model: 'gpt-4o-mini', supports_tools: true, api_format: 'openai' },
+  { label: '硅基流动 SiliconFlow', base_url: 'https://api.siliconflow.cn/v1', model: 'Qwen/Qwen2.5-7B-Instruct', supports_tools: true, api_format: 'openai' },
+  { label: 'DeepSeek', base_url: 'https://api.deepseek.com/v1', model: 'deepseek-chat', supports_tools: true, api_format: 'openai' },
+  { label: 'Ollama (本地)', base_url: 'http://host.docker.internal:11434/v1', model: 'qwen2.5:7b-instruct', supports_tools: false, api_format: 'openai' },
+  { label: '智谱 GLM', base_url: 'https://open.bigmodel.cn/api/paas/v4', model: 'glm-4-flash', supports_tools: true, api_format: 'openai' },
+  { label: 'Claude 官方', base_url: 'https://api.anthropic.com', model: 'claude-haiku-4-5-20251001', supports_tools: true, api_format: 'anthropic' },
+  { label: 'cc-trans (Claude 反代)', base_url: 'http://host.docker.internal:8787', model: 'claude-haiku-4-5-20251001', supports_tools: true, api_format: 'anthropic' },
 ]
 
 async function load() {
@@ -81,6 +83,7 @@ function applyPreset(p) {
   cfg.value.llm.base_url = p.base_url
   cfg.value.llm.model = p.model
   cfg.value.llm.supports_tools = p.supports_tools
+  cfg.value.llm.api_format = p.api_format || 'openai'
 }
 
 async function save() {
@@ -89,6 +92,7 @@ async function save() {
   try {
     const llm = {
       base_url: cfg.value.llm.base_url,
+      api_format: cfg.value.llm.api_format || 'openai',
       model: cfg.value.llm.model,
       temperature: parseFloat(cfg.value.llm.temperature),
       timeout: parseInt(cfg.value.llm.timeout, 10),
@@ -162,9 +166,21 @@ const wakeWordsText = computed({
             class="btn btn-secondary text-xs" @click="applyPreset(p)">{{ p.label }}</button>
         </div>
       </div>
-      <div>
-        <label class="label">Base URL (兼容 OpenAI 协议)</label>
-        <input v-model="cfg.llm.base_url" class="input" />
+      <div class="grid grid-cols-3 gap-2">
+        <div class="col-span-2">
+          <label class="label">Base URL</label>
+          <input v-model="cfg.llm.base_url" class="input" />
+        </div>
+        <div>
+          <label class="label">接口格式</label>
+          <select v-model="cfg.llm.api_format" class="input">
+            <option value="openai">OpenAI 兼容</option>
+            <option value="anthropic">Anthropic (Claude)</option>
+          </select>
+        </div>
+      </div>
+      <div class="text-xs text-slate-500">
+        OpenAI 兼容 = /chat/completions; Anthropic = /v1/messages (Claude 官方 / cc-trans 反代, key 填 cct-... 客户端令牌).
       </div>
       <div>
         <label class="label">API Key {{ cfg.llm.api_key_set ? '(已设置, 留空保持)' : '' }}</label>

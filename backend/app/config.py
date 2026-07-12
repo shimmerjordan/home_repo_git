@@ -14,6 +14,9 @@ CONFIG_PATH = Path(os.getenv("CONFIG_PATH", "/app/data/config.json"))
 
 class LLMConfig(BaseModel):
     base_url: str = Field(default="https://api.openai.com/v1", description="OpenAI-compatible base URL")
+    # "openai" = /chat/completions (OpenAI/DeepSeek/Ollama/硅基流动...);
+    # "anthropic" = /v1/messages (Claude 官方 / cc-trans 反代等 Anthropic 兼容网关)。
+    api_format: str = Field(default="openai", description='API 格式: "openai" 或 "anthropic"')
     api_key: str = Field(default="", description="API key (leave empty for Ollama etc.)")
     model: str = Field(default="gpt-4o-mini", description="Model name")
     temperature: float = Field(default=0.2, ge=0.0, le=2.0)
