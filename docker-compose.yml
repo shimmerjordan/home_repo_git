@@ -23,6 +23,9 @@ services:
     environment:
       - TZ=${TZ:-Asia/Shanghai}
     ports:
+      # HTTP 入口 (无证书弹窗, 日常用; 浏览器麦克风语音需 HTTPS)
+      - "${HTTP_PORT:-8080}:80"
+      # HTTPS 入口 (自签证书, iPad/手机语音用)
       - "${APP_PORT:-8443}:443"
     volumes:
       - ./data/certs:/etc/nginx/certs

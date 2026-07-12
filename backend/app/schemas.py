@@ -125,7 +125,7 @@ class IntentRecommendation(BaseModel):
 
 class IntentOperationResult(BaseModel):
     """Per-operation outcome when one utterance contains multiple operations."""
-    intent: str  # take_out / put_in / consume / create_item
+    intent: str  # find / take_out / put_in / consume / create_item
     item_id: Optional[int] = None
     item_name: Optional[str] = None
     quantity: int = 1

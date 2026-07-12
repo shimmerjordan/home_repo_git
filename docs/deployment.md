@@ -11,25 +11,25 @@ cd repo_git
 ./start.sh restart         # 重启
 ./start.sh logs            # 跟随日志
 ./start.sh ps              # 查看容器状态
-APP_PORT=9443 ./start.sh   # 自定义端口
+APP_PORT=9443 ./start.sh     # 自定义 HTTPS 端口
+HTTP_PORT=8090 ./start.sh    # 自定义 HTTP 端口
 ```
 
-只暴露**一个端口** `8443` (HTTPS,可改)。后端、Whisper 都仅在 docker 内网。
+暴露**两个端口**(均可改),不强制 HTTPS。后端、Whisper 都仅在 docker 内网:
 
-iPad Safari 打开 `https://<NAS-IP>:8443`:
-
-- 第一次会有自签证书警告,点 **高级 → 继续访问** 信任即可(证书会持久化在 `./data/certs/`,以后不再重生成)
-- HTTPS 是浏览器开麦克风的硬性要求,这就是为什么不暴露 HTTP
+- **HTTP `8080`** — 日常访问,无自签证书弹窗。注意:浏览器麦克风语音 (getUserMedia / SpeechRecognition) 要求 secure context,HTTP 下用不了(localhost 除外);文字输入、查看、3D、群机器人都不受影响
+- **HTTPS `8443`** — 需要在 iPad / 手机浏览器上用语音时走这个。第一次会有自签证书警告,点 **高级 → 继续访问** 信任即可(证书持久化在 `./data/certs/`,以后不再重生成)
 
 ## 端口约定
 
 | 服务 | 容器内 | 对外 |
 |---|---|---|
+| 前端 nginx HTTP | 80 | `${HTTP_PORT:-8080}` |
 | 前端 nginx HTTPS | 443 | `${APP_PORT:-8443}` |
 | 后端 FastAPI | 8000 | 仅内网 |
 | Whisper (可选) | 9000 | 仅内网 |
 
-API 文档:`https://<host>:8443/docs` (nginx 反代)
+API 文档:`http://<host>:8080/docs` 或 `https://<host>:8443/docs` (nginx 反代)
 
 ## 首次配置
 

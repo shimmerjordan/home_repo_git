@@ -9,7 +9,8 @@ FROM nginx:1.27-alpine
 RUN apk add --no-cache openssl
 COPY --from=build /app/dist /usr/share/nginx/html
 COPY nginx.conf /etc/nginx/conf.d/default.conf
+COPY app-common.conf /etc/nginx/app-common.conf
 COPY entrypoint.sh /entrypoint.sh
 RUN chmod +x /entrypoint.sh
-EXPOSE 443
+EXPOSE 80 443
 CMD ["/entrypoint.sh"]

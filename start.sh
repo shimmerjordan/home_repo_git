@@ -5,7 +5,8 @@
 #   ./start.sh --logs       # 启动后跟随日志
 #   ./start.sh stop         # 停止
 #   ./start.sh restart      # 重启
-#   APP_PORT=9443 ./start.sh   # 自定义端口
+#   APP_PORT=9443 ./start.sh    # 自定义 HTTPS 端口
+#   HTTP_PORT=8090 ./start.sh   # 自定义 HTTP 端口
 set -euo pipefail
 cd "$(dirname "$0")"
 
@@ -36,14 +37,16 @@ else
 fi
 
 PORT="${APP_PORT:-8443}"
+HTTP_PORT="${HTTP_PORT:-8080}"
 IP=$(hostname -I 2>/dev/null | awk '{print $1}')
 [ -z "$IP" ] && IP="<NAS-IP>"
 
 echo
 echo "=========================================="
 echo "  ✅ 已启动"
-echo "  访问: https://$IP:$PORT"
-echo "  iPad 第一次访问点 '高级 → 继续访问' 信任自签证书"
+echo "  日常访问 (无证书弹窗): http://$IP:$HTTP_PORT"
+echo "  语音要用 (自签 HTTPS): https://$IP:$PORT"
+echo "    (浏览器麦克风要求 HTTPS; 第一次点 '高级 → 继续访问' 信任证书)"
 echo "  停止: ./start.sh stop"
 echo "  日志: ./start.sh logs"
 echo "=========================================="

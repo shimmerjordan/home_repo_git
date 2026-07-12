@@ -16,7 +16,8 @@
 git clone <repo>
 cd repo_git
 ./start.sh
-# 浏览器打开 https://<NAS-IP>:8443  → 设置页配置 LLM API key → 开干
+# 浏览器打开 http://<NAS-IP>:8080 (无证书弹窗) → 设置页配置 LLM API key → 开干
+# 要用浏览器麦克风语音时改走 https://<NAS-IP>:8443 (自签证书, 首次需信任)
 ```
 
 ---
