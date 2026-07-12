@@ -98,7 +98,9 @@ class LLMClient:
         """Return a normalized result: {content: str, tool_calls: list[{name, arguments(dict)}]}."""
         use_tools = bool(tools) and self.cfg.supports_tools
         if self._is_anthropic:
-            # Anthropic /v1/messages: system 是顶层字段, max_tokens 必填, temperature ≤ 1。
+            # Anthropic /v1/messages: system 是顶层字段, max_tokens 必填。
+            # 不传 temperature —— Claude 新家族 (Opus 4.7+/Sonnet 5/Fable 5) 已移除该参数, 传了直接 400;
+            # 关键参数只有 model + thinking(mode) + output_config.effort (均可选, 留空不传)。
             system_parts = [m.get("content") or "" for m in messages if m.get("role") == "system"]
             msgs = [
                 {"role": m["role"], "content": m.get("content") or ""}
@@ -109,8 +111,13 @@ class LLMClient:
                 "model": self.cfg.model,
                 "messages": msgs,
                 "max_tokens": int(getattr(self.cfg, "max_tokens", 0) or 1024),
-                "temperature": min(self.cfg.temperature, 1.0),
             }
+            thinking = getattr(self.cfg, "thinking", "")
+            if thinking in ("adaptive", "disabled"):
+                payload["thinking"] = {"type": thinking}
+            effort = getattr(self.cfg, "effort", "")
+            if effort:
+                payload["output_config"] = {"effort": effort}
             if system_parts:
                 payload["system"] = "\n\n".join(p for p in system_parts if p)
             if use_tools:

@@ -20,6 +20,11 @@ class LLMConfig(BaseModel):
     api_key: str = Field(default="", description="API key (leave empty for Ollama etc.)")
     model: str = Field(default="gpt-4o-mini", description="Model name")
     temperature: float = Field(default=0.2, ge=0.0, le=2.0)
+    # Anthropic (Claude) 专用。Claude 新家族 (Opus 4.7+/Sonnet 5/Fable 5) 已移除
+    # temperature/top_p/top_k (传了直接 400), 关键参数只有 model + thinking(mode) + effort。
+    # 留空 = 不传该字段, 由模型用自身默认 —— 兼容所有 Claude 版本 (老模型如 Haiku 4.5 不认 adaptive/effort)。
+    thinking: str = Field(default="", description='Claude thinking mode: "" (不传) | "adaptive" | "disabled"')
+    effort: str = Field(default="", description='Claude effort: "" (不传) | low | medium | high | xhigh | max')
     timeout: int = Field(default=60, ge=5, le=300)
     # Some providers (Ollama old versions, certain inference servers) don't support tool calling.
     # When false, we fall back to JSON-mode prompting.

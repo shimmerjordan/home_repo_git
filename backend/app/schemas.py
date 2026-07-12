@@ -156,6 +156,8 @@ class LLMConfigPatch(BaseModel):
     api_key: Optional[str] = None
     model: Optional[str] = None
     temperature: Optional[float] = None
+    thinking: Optional[str] = None  # Claude: "" | "adaptive" | "disabled"
+    effort: Optional[str] = None  # Claude: "" | low | medium | high | xhigh | max
     timeout: Optional[int] = None
     supports_tools: Optional[bool] = None
     max_tokens: Optional[int] = None

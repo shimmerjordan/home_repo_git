@@ -95,6 +95,8 @@ async function save() {
       api_format: cfg.value.llm.api_format || 'openai',
       model: cfg.value.llm.model,
       temperature: parseFloat(cfg.value.llm.temperature),
+      thinking: cfg.value.llm.thinking || '',
+      effort: cfg.value.llm.effort || '',
       timeout: parseInt(cfg.value.llm.timeout, 10),
       supports_tools: !!cfg.value.llm.supports_tools,
       max_tokens: parseInt(cfg.value.llm.max_tokens, 10) || 512,
@@ -191,9 +193,17 @@ const wakeWordsText = computed({
         <input v-model="cfg.llm.model" class="input" />
       </div>
       <div class="grid grid-cols-3 gap-2">
-        <div>
+        <div v-if="cfg.llm.api_format !== 'anthropic'">
           <label class="label">Temperature</label>
           <input v-model="cfg.llm.temperature" type="number" step="0.1" class="input" />
+        </div>
+        <div v-else>
+          <label class="label">思考模式 (thinking)</label>
+          <select v-model="cfg.llm.thinking" class="input">
+            <option value="">默认 (不传)</option>
+            <option value="adaptive">adaptive · 自适应</option>
+            <option value="disabled">disabled · 关闭</option>
+          </select>
         </div>
         <div>
           <label class="label">Timeout (秒)</label>
@@ -204,6 +214,23 @@ const wakeWordsText = computed({
             <input type="checkbox" v-model="cfg.llm.supports_tools" /> 支持工具调用
           </label>
         </div>
+      </div>
+      <div v-if="cfg.llm.api_format === 'anthropic'" class="grid grid-cols-3 gap-2">
+        <div>
+          <label class="label">思考深度 (effort)</label>
+          <select v-model="cfg.llm.effort" class="input">
+            <option value="">默认 (不传)</option>
+            <option value="low">low · 最快</option>
+            <option value="medium">medium</option>
+            <option value="high">high</option>
+            <option value="xhigh">xhigh</option>
+            <option value="max">max</option>
+          </select>
+        </div>
+      </div>
+      <div v-if="cfg.llm.api_format === 'anthropic'" class="text-xs text-slate-500">
+        Claude 新模型 (Opus 4.7+/Sonnet 5) 不接受 temperature (传了会 400), 关键参数只有 model / thinking / effort.
+        两项留空可兼容所有 Claude 版本 (老模型如 Haiku 4.5 不认 adaptive/effort); 语音助手求快可选 disabled + low.
       </div>
       <div class="text-xs text-slate-500">
         勾选后用 OpenAI 风格 tool_calls; 否则降级为 JSON 模式 (适配老 Ollama 等).
