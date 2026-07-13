@@ -22,12 +22,16 @@ services:
       - backend
     environment:
       - TZ=${TZ:-Asia/Shanghai}
+      # 局域网 IP(可空格/逗号分隔多个), 写进服务器证书 SAN, 让 iPad 用 https://<IP>:8443
+      # 装信任本地 CA 后零弹窗。由 start.sh 自动探测传入; 也可手动 export LAN_IP=...
+      - LAN_IP=${LAN_IP:-}
     ports:
-      # HTTP 入口 (无证书弹窗, 日常用; 浏览器麦克风语音需 HTTPS)
+      # HTTP 入口: 本机访问 / 下载 CA 证书 (http://<ip>:8080/ca.crt)
       - "${HTTP_PORT:-8080}:80"
-      # HTTPS 入口 (自签证书, iPad/手机语音用)
+      # HTTPS 入口: iPad/手机局域网用语音走这里
       - "${APP_PORT:-8443}:443"
     volumes:
+      # 持久化本地 CA + 服务器证书, 重建容器不丢 (CA 换了 iPad 就得重装)
       - ./data/certs:/etc/nginx/certs
 
   whisper:

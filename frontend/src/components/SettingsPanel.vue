@@ -155,6 +155,9 @@ const wakeWordsText = computed({
   get: () => (cfg.value?.voice?.wake_words || []).join(','),
   set: (v) => { if (cfg.value) cfg.value.voice.wake_words = v.split(/[,，]/).map(s => s.trim()).filter(Boolean) },
 })
+
+// 证书 / 安全访问: 是否已是安全环境 (https 或本机 localhost/127.0.0.1)。
+const isSecure = computed(() => typeof window !== 'undefined' && window.isSecureContext)
 </script>
 
 <template>
@@ -329,6 +332,39 @@ const wakeWordsText = computed({
         <input v-model="cfg.voice.whisper_url" class="input" />
       </div>
       <button class="btn btn-primary" :disabled="saving" @click="save">保存</button>
+    </div>
+
+    <!-- 局域网设备语音: HTTPS 证书 (full-width) -->
+    <div class="card p-4 space-y-3 md:col-span-2">
+      <div class="font-semibold flex items-center gap-2">
+        🔒 局域网语音访问 (安全证书)
+        <span class="text-xs text-slate-400 font-normal">iPad / 手机用语音需 HTTPS</span>
+      </div>
+      <div class="text-xs text-slate-500 leading-relaxed">
+        浏览器只在安全环境下才允许网页开麦克风。本机 (localhost / 127.0.0.1) 走 HTTP 就行;
+        但 <b>iPad / 手机用局域网 IP 访问时必须走 HTTPS</b> (Safari 对局域网 IP 无 HTTP 豁免)。
+        下载并信任本机自建的 CA 证书后, 访问 <code>https://&lt;本机IP&gt;:8443</code> 即可, 不再弹"不安全"。
+      </div>
+      <div>
+        <a :href="'/ca.crt'" class="btn btn-primary inline-block" target="_blank" rel="noopener">
+          ⬇ 下载 CA 证书 (ca.crt)
+        </a>
+      </div>
+      <div class="text-xs text-slate-500 leading-relaxed border-t pt-3">
+        <b>iPad / iPhone 安装步骤 (一次性):</b>
+        <ol class="list-decimal ml-4 mt-1 space-y-0.5">
+          <li>用设备的 <b>Safari</b> 打开本页并点上面的下载按钮 (或直接访问 <code>http://&lt;本机IP&gt;:8080/ca.crt</code>)</li>
+          <li>设置 → 通用 → <b>VPN 与设备管理</b> → 安装刚下载的描述文件</li>
+          <li>设置 → 通用 → 关于本机 → <b>证书信任设置</b> → 打开对 "Voice Storage Local CA" 的完全信任</li>
+          <li>之后访问 <code>https://&lt;本机IP&gt;:8443</code> 无警告, 语音可用</li>
+        </ol>
+        <div class="mt-2">
+          当前访问环境:
+          <b :class="isSecure ? 'text-emerald-600' : 'text-amber-600'">
+            {{ isSecure ? '安全 (麦克风可用)' : '非安全 (局域网 IP + HTTP, 麦克风被浏览器禁用)' }}
+          </b>
+        </div>
+      </div>
     </div>
 
     <!-- DingTalk bot integration (full-width card under the LLM+Voice cards) -->

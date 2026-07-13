@@ -209,7 +209,7 @@ const lvlClass = {
         <ul class="text-xs space-y-1 font-mono">
           <li>地址: <span class="break-all">{{ caps.href }}</span></li>
           <li>secure context: <b :class="caps.secure_context ? 'text-emerald-600' : 'text-red-600'">{{ caps.secure_context }}</b>
-            <span v-if="!caps.secure_context" class="text-amber-600"> ← 需要 https 才能开麦克风</span>
+            <span v-if="!caps.secure_context" class="text-amber-600"> ← 非安全环境,仅本机 127.0.0.1 / localhost 才能开麦克风</span>
           </li>
           <li>mediaDevices: <b :class="caps.has_mediaDevices ? 'text-emerald-600' : 'text-red-600'">{{ caps.has_mediaDevices }}</b></li>
           <li>SpeechRecognition: <b :class="caps.has_speech_recognition ? 'text-emerald-600' : 'text-red-600'">{{ caps.has_speech_recognition }}</b></li>

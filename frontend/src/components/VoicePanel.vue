@@ -96,8 +96,9 @@ const errorMsg = ref('')
 const heardAnswer = ref('')       // what was heard during yes/no
 const history = ref([])
 const recentTx = ref([])
-const isHttps = computed(() => typeof window !== 'undefined'
-  && (window.location.protocol === 'https:' || window.location.hostname === 'localhost'))
+// 麦克风可用 = 浏览器 secure context。它天然覆盖 https 以及本机 localhost /
+// 127.0.0.1 / ::1 的 HTTP —— 后者纯 HTTP 也能开麦, 只有局域网 IP + HTTP 才被浏览器禁止。
+const micAvailable = computed(() => typeof window !== 'undefined' && window.isSecureContext)
 
 // Pending promise resolver for confirm dialogs (yes/no by voice OR button).
 const pendingAnswer = ref(null) // function(boolean)
@@ -725,8 +726,8 @@ const inConfirm = computed(() => phase.value === 'confirm-text' || phase.value =
                 :disabled="phase !== 'idle' || !transcript.trim()" @click="submitText">发送</button>
       </div>
 
-      <div v-if="!isHttps" class="mt-3 text-xs bg-amber-400/20 text-amber-200 rounded p-2">
-        ⚠ HTTP 访问无法用麦克风,请改用 https://&lt;ip&gt;:8443
+      <div v-if="!micAvailable" class="mt-3 text-xs bg-amber-400/20 text-amber-200 rounded p-2">
+        ⚠ 当前地址下浏览器禁止开麦克风(仅本机 127.0.0.1 / localhost 的 HTTP 允许)。语音不可用,其它功能正常。
       </div>
       <div v-if="errorMsg" class="mt-2 text-xs bg-red-500/30 rounded p-2">{{ errorMsg }}</div>
       <div v-if="voice.error.value" class="mt-2 text-xs bg-red-500/30 rounded p-2">{{ voice.error.value }}</div>

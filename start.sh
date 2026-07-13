@@ -30,6 +30,10 @@ done
 
 mkdir -p data data/certs
 
+# 探测本机所有 IPv4, 写进服务器证书 SAN (让 iPad 用 https://<局域网IP> 时证书匹配)。
+# 可手动覆盖: LAN_IP="192.168.1.50 10.0.0.2" ./start.sh
+export LAN_IP="${LAN_IP:-$(hostname -I 2>/dev/null || true)}"
+
 if [ ${#PROFILES[@]} -gt 0 ]; then
   docker compose "${PROFILES[@]}" "${CMD[@]}"
 else
@@ -38,17 +42,23 @@ fi
 
 PORT="${APP_PORT:-8443}"
 HTTP_PORT="${HTTP_PORT:-8080}"
-IP=$(hostname -I 2>/dev/null | awk '{print $1}')
+IP=$(echo "$LAN_IP" | awk '{print $1}')
 [ -z "$IP" ] && IP="<NAS-IP>"
 
 echo
 echo "=========================================="
 echo "  ✅ 已启动"
-echo "  日常访问 (无证书弹窗): http://$IP:$HTTP_PORT"
-echo "  语音要用 (自签 HTTPS): https://$IP:$PORT"
-echo "    (浏览器麦克风要求 HTTPS; 第一次点 '高级 → 继续访问' 信任证书)"
-echo "  停止: ./start.sh stop"
-echo "  日志: ./start.sh logs"
+echo
+echo "  本机(电脑)访问 —— HTTP 即可, 语音也能用:"
+echo "    http://127.0.0.1:$HTTP_PORT"
+echo
+echo "  iPad / 手机(局域网)用语音 —— 需 HTTPS, 一次性装信任本地 CA 后零弹窗:"
+echo "    1) 用设备浏览器打开   http://$IP:$HTTP_PORT/ca.crt   下载证书"
+echo "    2) iOS: 设置 → 通用 → VPN与设备管理 → 安装该描述文件"
+echo "       再到 设置 → 通用 → 关于本机 → 证书信任设置 → 打开对该 CA 的完全信任"
+echo "    3) 之后访问          https://$IP:$PORT              不再弹\"不安全\""
+echo
+echo "  停止: ./start.sh stop    日志: ./start.sh logs"
 echo "=========================================="
 
 if $FOLLOW; then
