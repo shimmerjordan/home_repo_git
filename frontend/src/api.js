@@ -26,6 +26,7 @@ export const api = {
   },
   createItem: (data) => request('/api/items', { method: 'POST', body: JSON.stringify(data) }),
   updateItem: (id, data) => request(`/api/items/${id}`, { method: 'PATCH', body: JSON.stringify(data) }),
+  getItem: (id) => request(`/api/items/${id}`),
   deleteItem: (id) => request(`/api/items/${id}`, { method: 'DELETE' }),
   itemTransactions: (id) => request(`/api/items/${id}/transactions`),
   exportItemsUrl: () => '/api/items/export.csv',

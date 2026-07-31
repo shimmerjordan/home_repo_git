@@ -4,6 +4,7 @@ import { api } from '../api'
 import { useVoice } from '../composables/useVoice'
 import { useAudioMeter } from '../composables/useAudioMeter'
 import Waveform from './Waveform.vue'
+import ItemQuickActions from './ItemQuickActions.vue'
 import { isLowEndDevice } from '../composables/sceneLayout'
 
 // three.js (~600 KB) is only pulled in through Scene3D, and here it renders solely once a
@@ -201,6 +202,12 @@ async function markConsumed(p) {
     await loadPending()
     emit('changed')
   } catch (e) { console.warn('mark consumed failed', e) }
+}
+
+// 快捷操作成功后统一刷新: 流水、3D 场景、待归位、待补充四个列表都可能受影响。
+function onQuickActionDone() {
+  loadRecent(); loadScene(); loadPending(); loadDepleted()
+  emit('changed')
 }
 
 function timeAgo(iso) {
@@ -802,13 +809,21 @@ const inConfirm = computed(() => phase.value === 'confirm-text' || phase.value =
                 <tr><th class="text-left py-1">物品</th><th class="text-left py-1">用途</th><th class="text-left py-1">位置</th></tr>
               </thead>
               <tbody>
-                <tr v-for="rec in result.recommendations" :key="rec.item_id"
-                    class="border-t border-slate-100 hover:bg-slate-50 cursor-pointer"
-                    @click="pickCandidate({ item_id: rec.item_id, item_name: candidateNameOf(rec.item_id) })">
-                  <td class="py-1 font-medium">{{ candidateNameOf(rec.item_id) }}</td>
-                  <td class="py-1 text-slate-600">{{ rec.purpose }}</td>
-                  <td class="py-1 text-slate-500 truncate">{{ candidateLocOf(rec.item_id) || '—' }}</td>
-                </tr>
+                <!-- 操作按钮独占第二行(colspan): 卡片只有 1/3 宽, 加第 4 列会把按钮挤成一竖条。 -->
+                <template v-for="rec in result.recommendations" :key="rec.item_id">
+                  <tr class="border-t border-slate-100 hover:bg-slate-50 cursor-pointer"
+                      @click="pickCandidate({ item_id: rec.item_id, item_name: candidateNameOf(rec.item_id) })">
+                    <td class="py-1 font-medium">{{ candidateNameOf(rec.item_id) }}</td>
+                    <td class="py-1 text-slate-600">{{ rec.purpose }}</td>
+                    <td class="py-1 text-slate-500 truncate">{{ candidateLocOf(rec.item_id) || '—' }}</td>
+                  </tr>
+                  <tr>
+                    <td colspan="3" class="pb-1">
+                      <ItemQuickActions :item-id="rec.item_id" :locations="sceneLocations" compact
+                                        @done="onQuickActionDone" />
+                    </td>
+                  </tr>
+                </template>
               </tbody>
             </table>
           </div>
@@ -817,12 +832,16 @@ const inConfirm = computed(() => phase.value === 'confirm-text' || phase.value =
             <div class="label mb-1">候选物品</div>
             <ul class="space-y-1.5 max-h-48 overflow-auto">
               <li v-for="c in result.candidates" :key="c.item_id"
-                  class="flex items-center justify-between bg-white border border-slate-200 rounded-lg p-2">
-                <span class="min-w-0 truncate">
-                  <span class="font-medium">{{ c.item_name }}</span>
-                  <span class="text-slate-500 ml-2 text-xs">{{ c.location_path || '未指定位置' }}</span>
-                </span>
-                <button class="btn btn-secondary text-xs flex-shrink-0" :disabled="phase !== 'idle'" @click="pickCandidate(c)">选这个</button>
+                  class="bg-white border border-slate-200 rounded-lg p-2">
+                <div class="flex items-center justify-between gap-2">
+                  <span class="min-w-0 truncate">
+                    <span class="font-medium">{{ c.item_name }}</span>
+                    <span class="text-slate-500 ml-2 text-xs">{{ c.location_path || '未指定位置' }}</span>
+                  </span>
+                  <button class="btn btn-secondary text-xs flex-shrink-0" :disabled="phase !== 'idle'" @click="pickCandidate(c)">选这个</button>
+                </div>
+                <ItemQuickActions :item-id="c.item_id" :locations="sceneLocations" compact
+                                  @done="onQuickActionDone" />
               </li>
             </ul>
           </div>
@@ -901,6 +920,8 @@ const inConfirm = computed(() => phase.value === 'confirm-text' || phase.value =
           <span class="font-mono text-slate-500">×{{ t.quantity }}</span>
           <span class="text-slate-500 truncate flex-1">{{ t.location_path || '' }}</span>
           <span class="text-xs text-slate-400">{{ fmtFull(t.created_at) }}</span>
+          <ItemQuickActions v-if="t.item_id" :item-id="t.item_id" :locations="sceneLocations"
+                            @done="onQuickActionDone" />
         </li>
       </ul>
     </div>
