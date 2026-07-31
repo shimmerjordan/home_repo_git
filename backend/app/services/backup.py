@@ -2,7 +2,7 @@
 
 设计要点 (见计划):
   - **裸 DB 为主**: 整个 SQLite 文件快照是恢复主道, 以后加表/加字段自动覆盖、零维护。
-  - **JSON 辅助**: 物品/位置/流水/审计另导出可读 JSON, 供人工查看与跨端 (小程序) 导入。
+  - **JSON 辅助**: 物品/位置/流水/审计另导出可读 JSON, 供人工查看备份内容。
   - **声明式组件注册表** COMPONENTS: 备份遍历它决定入包内容; 加组件 = 加一条。
   - **GFS 分层保留** apply_gfs: 纯函数, 按文件名时间戳分日/周/月桶。
   - **可选 AES-256 加密** (cryptography, 缺库时备份报错而非静默明文)。
@@ -453,10 +453,13 @@ def restore(archive_bytes: bytes, passphrase: str = "",
                 # 主道: 裸 SQLite 快照 (NAS 版备份)。
                 _restore_database(zf.read("db/storage.db"))
                 restored.append("database")
-            elif any(n.startswith("data/") for n in names):
-                # 回退: 无裸库时从 data/*.json 重建 (如小程序产出的备份, 实现跨端恢复)。
-                _restore_database_from_json(zf, names)
-                restored.append("database")
+            else:
+                # 只勾了流水/审计组件的包不含裸库。明确报错, 不能静默跳过 ——
+                # 否则 restored 里没有 "database", 用户会以为恢复成功了。
+                raise ValueError(
+                    "备份包内没有裸 SQLite 快照 (db/storage.db), 无法恢复数据库。"
+                    "该包可能只勾选了流水或审计组件。"
+                )
 
         if "logs" in targets:
             log_files = [n for n in names if n.startswith("logs/")]
@@ -483,71 +486,6 @@ def _parse_dt(s):
         return datetime.fromisoformat(str(s).replace("Z", "+00:00"))
     except ValueError:
         return None
-
-
-def _restore_database_from_json(zf: zipfile.ZipFile, names: set) -> None:
-    """从备份包内的 data/*.json 重建库 (跨端: 小程序备份没有裸 SQLite)。
-    清空 locations/items/transactions/audit_log 后按 JSON 重新插入, 保留原 id。
-    字段与 services/inventory.serialize_* / audit.serialize 对齐。"""
-    from .. import models
-    from ..database import SessionLocal
-
-    def _load(name):
-        return json.loads(zf.read(name)) if name in names else []
-
-    locs = _load("data/locations.json")
-    items = _load("data/items.json")
-    txs = _load("data/transactions.json")
-    audits = _load("data/audit.json")
-
-    import uuid as _uuid
-    db = SessionLocal()
-    try:
-        # 全清后重建 (整库恢复语义, 与裸库覆盖一致)。整个过程在一个事务里,
-        # 任一步失败则 rollback, 原数据不丢 (另有 _pre_restore_snapshot 文件级兜底)。
-        db.query(models.Transaction).delete()
-        db.query(models.Item).delete()
-        db.query(models.AuditLog).delete()
-        db.query(models.Location).delete()
-        db.flush()
-        for l in locs:
-            geo = l.get("geometry")
-            db.add(models.Location(
-                id=l.get("id"), uuid=l.get("uuid") or str(_uuid.uuid4()), name=l.get("name") or "",
-                kind=l.get("kind") or "room", parent_id=l.get("parent_id"),
-                note=l.get("note") or "",
-                geometry=json.dumps(geo, ensure_ascii=False) if isinstance(geo, (dict, list)) else (geo or ""),
-                created_at=_parse_dt(l.get("created_at")) or datetime.now()))
-        for it in items:
-            db.add(models.Item(
-                id=it.get("id"), name=it.get("name") or "", aliases=it.get("aliases") or "",
-                category=it.get("category") or "", tags=it.get("tags") or "",
-                quantity=it.get("quantity") or 0, price=it.get("price") or 0.0,
-                note=it.get("note") or "", location_id=it.get("location_id"),
-                pos_x=it.get("pos_x"), pos_z=it.get("pos_z"),
-                created_at=_parse_dt(it.get("created_at")) or datetime.now(),
-                updated_at=_parse_dt(it.get("updated_at")) or datetime.now()))
-        for t in txs:
-            db.add(models.Transaction(
-                id=t.get("id"), item_id=t.get("item_id"), action=t.get("action") or "adjust",
-                quantity=t.get("quantity") or 0, location_id=t.get("location_id"),
-                note=t.get("note") or "", created_at=_parse_dt(t.get("created_at")) or datetime.now()))
-        for a in audits:
-            ch = a.get("changes")
-            db.add(models.AuditLog(
-                id=a.get("id"), ts=_parse_dt(a.get("ts")) or datetime.now(),
-                entity_type=a.get("entity_type") or "", entity_id=a.get("entity_id"),
-                entity_name=a.get("entity_name") or "", action=a.get("action") or "",
-                changes=json.dumps(ch, ensure_ascii=False) if isinstance(ch, (dict, list)) else (ch or ""),
-                summary=a.get("summary") or "", source=a.get("source") or "import"))
-        db.commit()
-        app_log.info("backup: 从 JSON 重建库完成 (locations=%d items=%d tx=%d audit=%d)",
-                     len(locs), len(items), len(txs), len(audits))
-    except Exception:
-        db.rollback()  # 失败回滚, 保留原数据 (deletes 也一并撤销)
-        raise
-    finally:
-        db.close()
 
 
 def _restore_database(snapshot: bytes) -> None:

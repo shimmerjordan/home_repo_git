@@ -15,7 +15,10 @@
 | `logs` | `logs/app.log*` | 系统日志 |
 
 > 设计取舍: 以**整库 SQLite 快照**为恢复主道 —— 以后加表/加字段自动覆盖、零维护;
-> JSON 是可读导出 + 跨端 (如小程序) 导入用。详见 [`backend/app/services/backup.py`](../backend/app/services/backup.py)。
+> JSON 是可读导出, 便于人工查看备份内容。详见 [`backend/app/services/backup.py`](../backend/app/services/backup.py)。
+>
+> 注意: 恢复 `database` 必须有裸库 `db/storage.db`, 它只在勾选 `inventory` 组件时入包。
+> 只勾了流水或审计的备份包无法恢复数据库, 会明确报错。
 
 ## 备份包格式
 

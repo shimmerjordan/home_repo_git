@@ -414,10 +414,25 @@ Expected: 无输出
 > JSON 是可读导出, 便于人工查看备份内容。详见 [`backend/app/services/backup.py`](../backend/app/services/backup.py)。
 ```
 
-- [ ] **Step 5: 后端能正常导入**
+- [ ] **Step 5: 后端静态校验**
 
-Run: `cd backend && python -c "from app.services import backup; print('ok')"`
-Expected: 打印 `ok`,无 NameError(确认没有残留调用)
+宿主机**无法**做真实导入验证:`app.config` 在模块级会去建容器路径 `/app`(PermissionError),
+且宿主机未装 sqlalchemy。改用不执行模块级代码的校验:
+
+```bash
+cd backend && python -m py_compile app/services/backup.py
+python - <<'EOF'
+import ast
+tree = ast.parse(open('app/services/backup.py').read())
+defined = {n.name for n in ast.walk(tree) if isinstance(n, ast.FunctionDef)}
+called  = {n.func.id for n in ast.walk(tree) if isinstance(n, ast.Call) and isinstance(n.func, ast.Name)}
+assert '_restore_database_from_json' not in defined | called, "残留引用"
+assert not {c for c in called if c.startswith('_restore')} - defined, "存在未定义的 _restore* 调用"
+print('ok')
+EOF
+```
+
+Expected: 打印 `ok`。真实导入验证留到容器内(`docker compose up` 后看后端日志)。
 
 - [ ] **Step 6: 全仓验证小程序已清干净**
 
