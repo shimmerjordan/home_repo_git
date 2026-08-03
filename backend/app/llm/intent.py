@@ -25,9 +25,13 @@ SYSTEM_PROMPT = """你是家庭仓储管家的语义解析器, 同时要给出�
 你的工作:
 1. 阅读用户语句和当前的库存摘要
 2. 注意位置层级最上层可能是"家"(如 我家 / 老家 / 父母家),"家"下面才是房间。用户没特别说"在老家"之类的话, 默认指主要居住的家
-3. 选择一个意图: find / take_out / put_in / consume / list / create_item / assist / unknown
+3. 选择一个意图: find / take_out / put_in / consume / list / create_item / delete_item / assist / unknown
    - take_out: "借出" — 我拿出来用一下, **稍后需要归位**(如 "我拿了卷尺"/"借走螺丝刀"/"拿出充电宝")
    - consume:  "消耗完" — 用完了/扔了/吃了/送人了, **不会归位**(如 "我喝完了一瓶水"/"用完最后一支牙膏"/"吃了两片药"/"扔了过期面包")
+   - delete_item: "把这条记录删掉" — 用户要**移除物品档案本身**, 不是消耗库存
+     (如 "把充电宝从库里删了"/"删除这条记录"/"这个物品不要了, 删掉")
+     与 consume 的区别: consume 是东西用完了但档案还在(可以再补货); delete_item 是这条记录压根不该存在
+     后端不会立即执行, 会让用户在界面上二次确认
    - 如果用户没明示但语义模糊(如"拿了 X"), 默认 take_out (借出, 提示归位); "用了/喝了/吃了/扔了/丢了/送了" 这类完成态明显是 consume
    - assist: 用户表达"需求/症状/问题"(如 "我发烧了家里有什么药"、"想擦地板用什么"),
      需要你从库存里挑选可能解决该需求的所有相关物品。把 item_id 全部放进 candidates,
@@ -51,7 +55,7 @@ SYSTEM_PROMPT = """你是家庭仓储管家的语义解析器, 同时要给出�
 
 批量操作 (重要):
 - 用户一句话涉及**多个物品**时 (无论查询还是操作), 必须把每个物品的操作都列进 operations 数组, 一条不落, 绝不能只处理第一个
-- operations 里每条包含: intent(find/take_out/put_in/consume/create_item) / item_id(库存里有就填) / item_name / location_id / location_name / quantity
+- operations 里每条包含: intent(find/take_out/put_in/consume/create_item/delete_item) / item_id(库存里有就填) / item_name / location_id / location_name / quantity
 - 例1 "把手表、铅笔、橡皮放进书桌1" -> 三条 put_in; 位置从"位置列表"里找 id 填 location_id, 找不到就填 location_name="书桌1"; 物品不在库存时**仍用 put_in**(后端会自动新建到该位置)
 - 例2 "我消耗了一瓶水和两片药" -> 两条 consume
 - 例3 "手表和铅笔在哪" -> 两条 find
@@ -70,7 +74,7 @@ SYSTEM_PROMPT = """你是家庭仓储管家的语义解析器, 同时要给出�
 
 
 INTENT_SCHEMA_HINT = """{
-  "intent": "find|take_out|put_in|consume|list|create_item|assist|unknown",
+  "intent": "find|take_out|put_in|consume|list|create_item|delete_item|assist|unknown",
   "confidence": 0.0,
   "speech": "string (中文, 给用户的简短回答)",
   "item_id": null,                // 已存在物品 id (find/take_out/put_in)
@@ -79,7 +83,7 @@ INTENT_SCHEMA_HINT = """{
   "quantity": 1,
   "candidates": [123, 456],       // 备选 item_id, 当不确定时给出
   "operations": [                 // 一句话涉及多个物品时列出全部 (含 find 查询), 单操作留空
-    {"intent": "consume|find|take_out|put_in|create_item", "item_id": 12, "item_name": "矿泉水",
+    {"intent": "consume|find|take_out|put_in|create_item|delete_item", "item_id": 12, "item_name": "矿泉水",
      "location_id": null, "location_name": null, "quantity": 1}
   ],
   "reasoning": "string (一句解释)"
@@ -97,7 +101,7 @@ TOOLS = [
                 "properties": {
                     "intent": {
                         "type": "string",
-                        "enum": ["find", "take_out", "put_in", "consume", "list", "create_item", "assist", "unknown"],
+                        "enum": ["find", "take_out", "put_in", "consume", "list", "create_item", "delete_item", "assist", "unknown"],
                     },
                     "confidence": {"type": "number", "minimum": 0, "maximum": 1},
                     "speech": {"type": "string"},
@@ -122,7 +126,7 @@ TOOLS = [
                             "properties": {
                                 "intent": {
                                     "type": "string",
-                                    "enum": ["find", "take_out", "put_in", "consume", "create_item"],
+                                    "enum": ["find", "take_out", "put_in", "consume", "create_item", "delete_item"],
                                 },
                                 "item_id": {"type": ["integer", "null"]},
                                 "item_name": {"type": ["string", "null"]},
@@ -158,7 +162,8 @@ TOOLS = [
 ]
 
 
-MUTATION_INTENTS = {"take_out", "put_in", "consume", "create_item"}
+# delete_item 也算 mutation(低置信度要确认), 但它在执行层是唯一"只解析不执行"的动作。
+MUTATION_INTENTS = {"take_out", "put_in", "consume", "create_item", "delete_item"}
 # Batch entries may additionally be read-only lookups ("手表和铅笔在哪").
 BATCH_INTENTS = MUTATION_INTENTS | {"find"}
 
@@ -296,18 +301,43 @@ def _find_exact_item(db: Session, name: str) -> models.Item | None:
     return None
 
 
-def _find_item_for_op(db: Session, op: dict[str, Any]) -> models.Item | None:
-    """Resolve one batch operation to an existing item: by id, then by name search."""
+def _cand_dicts(items: list[models.Item]) -> list[dict[str, Any]]:
+    """Serialize items as IntentCandidate dicts, best match first."""
+    return [
+        {
+            "item_id": it.id,
+            "item_name": it.name,
+            "location_path": location_path(it.location) if it.location else None,
+            "score": 1.0 - (i * 0.05),
+        }
+        for i, it in enumerate(items)
+    ]
+
+
+def _find_item_for_op(
+    db: Session, op: dict[str, Any]
+) -> tuple[models.Item | None, list[models.Item], str]:
+    """Resolve one operation to an existing item.
+
+    Returns (命中项, 候选列表, matched_by)。matched_by 是 exact / fuzzy / none。
+    候选列表**必须**带回前端 —— 模糊匹配拿 top-1 就执行是误操作的根源:
+    用户说"存入充电宝", 库里只有"充电器", 以前会直接给充电器加库存且不告诉任何人。
+    """
     if op.get("item_id"):
         item = db.query(models.Item).get(op["item_id"])
         if item:
-            return item
+            return item, [item], "exact"
     name = (op.get("item_name") or "").strip()
-    if name:
-        matches = search_items(db, name, limit=1)
-        if matches:
-            return matches[0]
-    return None
+    if not name:
+        return None, [], "none"
+    exact = _find_exact_item(db, name)
+    if exact:
+        return exact, [exact], "exact"
+    # 以前是 limit=1 —— 候选本就查得到, 只是被丢掉了。
+    matches = search_items(db, name, limit=5)
+    if matches:
+        return matches[0], matches, "fuzzy"
+    return None, [], "none"
 
 
 def _apply_stock_op(
@@ -411,16 +441,35 @@ def _execute_batch(
             "executed": False,
             "transaction_id": None,
             "speech": "",
+            "candidates": [],
+            "matched_by": "",
+            "pending": False,
+            "location_path": None,
+            "remaining": None,
         }
         item: models.Item | None = None
         if intent == "find":
-            item = _find_item_for_op(db, op)
+            item, cands, how = _find_item_for_op(db, op)
+            r["candidates"] = _cand_dicts(cands)
+            r["matched_by"] = how
             if not item:
                 r["speech"] = f"没找到{op.get('item_name') or '该物品'}"
             else:
                 loc = location_path(item.location) if item.location else "未登记位置"
                 r.update(item_id=item.id, item_name=item.name, executed=True)
                 r["speech"] = f"{item.name}在{loc}(×{item.quantity})"
+        elif intent == "delete_item":
+            # 唯一不立即执行的动作。Item.transactions 是 cascade delete-orphan,
+            # 真删会连带抹掉全部历史流水且无法还原, 所以只解析目标, 等前端确认。
+            item, cands, how = _find_item_for_op(db, op)
+            r["candidates"] = _cand_dicts(cands)
+            r["matched_by"] = how
+            if not item:
+                r["speech"] = f"没找到{op.get('item_name') or '该物品'}"
+            else:
+                loc = location_path(item.location) if item.location else "未登记位置"
+                r.update(item_id=item.id, item_name=item.name, pending=True)
+                r["speech"] = f"要永久删除{item.name}({loc})吗?确认后不可恢复"
         elif intent == "create_item":
             name = (op.get("item_name") or "").strip()
             if not name:
@@ -432,12 +481,16 @@ def _execute_batch(
                 mutated = True
                 r.update(item_id=item.id, item_name=item.name,
                          executed=True, transaction_id=tx.id)
+                r["candidates"] = _cand_dicts([item])
+                r["matched_by"] = "exact" if merged else "created"
                 if merged:
                     r["speech"] = f"已存入{item.name}×{qty}(共{item.quantity})"
                 else:
                     r["speech"] = f"已新增{item.name}×{qty}"
         else:
-            item = _find_item_for_op(db, op)
+            item, cands, how = _find_item_for_op(db, op)
+            r["candidates"] = _cand_dicts(cands)
+            r["matched_by"] = how
             loc_id = _resolve_location(db, op)
             if not item:
                 name = (op.get("item_name") or "").strip()
@@ -448,6 +501,8 @@ def _execute_batch(
                     mutated = True
                     r.update(item_id=item.id, item_name=item.name,
                              executed=True, transaction_id=tx.id)
+                    r["candidates"] = _cand_dicts([item])
+                    r["matched_by"] = "created"
                     loc_text = location_path(item.location) if item.location else "未指定位置"
                     r["speech"] = f"库里没有{item.name}, 已新建×{qty}放到{loc_text}"
                 else:
@@ -463,6 +518,9 @@ def _execute_batch(
                     r["speech"] = f"已存入{item.name}×{qty}到{loc_text}(共{item.quantity})"
                 else:
                     r["speech"] = f"已{_OP_VERB[intent]}{item.name}×{qty}(剩{item.quantity})"
+        if item is not None:
+            r["location_path"] = location_path(item.location) if item.location else None
+            r["remaining"] = item.quantity
         if r["executed"] and item is not None:
             cand.append({
                 "item_id": item.id,
@@ -490,6 +548,32 @@ def _execute_batch(
     if not base["speech"] or failed or not has_mutation:
         base["speech"] = "; ".join(fragments)
     return base
+
+
+def _single_op(
+    intent: str, item: models.Item | None, qty: int, *,
+    executed: bool = False, tx_id: int | None = None, pending: bool = False,
+    matched_by: str = "", candidates: list[dict[str, Any]] | None = None,
+    speech: str = "",
+) -> dict[str, Any]:
+    """把单条(非批量)操作也表述成一条 operation 记录。
+
+    前端因此只需要一套渲染与改判逻辑, 不用为单条/批量分叉。
+    """
+    return {
+        "intent": intent,
+        "item_id": item.id if item else None,
+        "item_name": item.name if item else None,
+        "quantity": qty,
+        "executed": executed,
+        "transaction_id": tx_id,
+        "speech": speech,
+        "candidates": candidates if candidates is not None else (_cand_dicts([item]) if item else []),
+        "matched_by": matched_by,
+        "pending": pending,
+        "location_path": location_path(item.location) if (item and item.location) else None,
+        "remaining": item.quantity if item else None,
+    }
 
 
 def _candidate_objects(db: Session, ids: list[int], fallback_query: str) -> list[models.Item]:
@@ -662,6 +746,30 @@ def execute_intent(
             base["speech"] = speech or f"已找到同名物品,已将数量+{qty},现在{item.name}共{item.quantity}个,位置:{loc_text}"
         else:
             base["speech"] = speech or f"记下啦,{name}放在{loc_text}了"
+        base["operations"] = [_single_op(
+            "create_item", item, qty, executed=True, tx_id=tx.id,
+            matched_by="exact" if merged else "created", speech=base["speech"],
+        )]
+        return base
+
+    if intent == "delete_item":
+        # 唯一不立即执行的动作 —— Item.transactions 是 cascade delete-orphan,
+        # 真删会连带抹掉全部历史流水且无法还原。只解析目标, 等前端确认。
+        item_id = parsed.get("item_id")
+        if not item_id and candidates_objs:
+            item_id = candidates_objs[0].id
+        item = db.query(models.Item).get(item_id) if item_id else None
+        if not item:
+            base["intent"] = "unknown"
+            base["speech"] = speech or "没找到要删除的物品"
+            return base
+        loc_text = location_path(item.location) if item.location else "未登记位置"
+        base["speech"] = f"要永久删除{item.name}({loc_text})吗?确认后不可恢复"
+        base["operations"] = [_single_op(
+            "delete_item", item, 1, pending=True,
+            matched_by="exact" if parsed.get("item_id") else "fuzzy",
+            candidates=base["candidates"] or None, speech=base["speech"],
+        )]
         return base
 
     if intent in {"take_out", "put_in", "consume"}:
@@ -691,6 +799,13 @@ def execute_intent(
             else:
                 loc_text = location_path(item.location) if item.location else "原位置"
                 base["speech"] = f"好的,已存入{item.name} {qty}个到{loc_text},现在共{item.quantity}件"
+        # LLM 直接给了 item_id 才算 exact; 否则是从搜索结果里取的 top-1 —— 标 fuzzy,
+        # 前端会打"猜的"角标提示用户复核。
+        base["operations"] = [_single_op(
+            intent, item, qty, executed=True, tx_id=tx.id,
+            matched_by="exact" if parsed.get("item_id") else "fuzzy",
+            candidates=base["candidates"] or None, speech=base["speech"],
+        )]
         return base
 
     # unknown

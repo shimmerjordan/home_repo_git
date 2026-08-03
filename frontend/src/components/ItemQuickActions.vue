@@ -1,6 +1,9 @@
 <script setup>
 import { ref, computed } from 'vue'
 import { api } from '../api'
+import { useActionLabels } from '../composables/useActionLabels'
+
+const { showLabels, toggleLabels } = useActionLabels()
 
 // 识别结果 / 流水条目上的快捷操作。绕过语音与 LLM, 直接打 REST,
 // 省掉"想取一件东西还得重新说一遍"的整轮 SR → 确认 → 意图解析。
@@ -108,22 +111,38 @@ async function removeItem() {
   if (!confirm(`确认永久删除「${snapshot.value.name}」?物品记录会消失,审计日志保留。`)) return
   run(() => api.deleteItem(props.itemId))
 }
+
+// 数据驱动而不是写五遍 <button>: 图标和文字标签绑在一起, 不会改了一个忘了另一个。
+const ACTIONS = [
+  { key: 'take', icon: '−', label: '取出', run: () => toggle('take') },
+  { key: 'put', icon: '⇪', label: '补库存', run: () => toggle('put') },
+  { key: 'move', icon: '⇄', label: '换位置', run: () => toggle('move') },
+  { key: 'used', icon: '⊗', label: '用完了', run: markUsedUp },
+  { key: 'del', icon: '🗑', label: '删除', danger: true, run: removeItem },
+]
 </script>
 
 <template>
   <div :class="compact ? 'mt-1' : ''">
     <!-- 全部 @click.stop: 推荐用品那一处的父行有 @click, 不拦会触发一轮 LLM 意图重放 -->
     <div class="flex items-center gap-1 flex-wrap">
-      <button class="btn btn-secondary text-xs" :disabled="busy" title="取出"
-              @click.stop="toggle('take')">−</button>
-      <button class="btn btn-secondary text-xs" :disabled="busy" title="补库存"
-              @click.stop="toggle('put')">⇪</button>
-      <button class="btn btn-secondary text-xs" :disabled="busy" title="换位置"
-              @click.stop="toggle('move')">⇄</button>
-      <button class="btn btn-secondary text-xs" :disabled="busy" title="用完了 (清零, 可补货复活)"
-              @click.stop="markUsedUp">⊗</button>
-      <button class="btn btn-danger text-xs" :disabled="busy" title="永久删除"
-              @click.stop="removeItem">🗑</button>
+      <button v-for="a in ACTIONS" :key="a.key"
+              :class="['btn btn-touch text-xs', a.danger ? 'btn-danger' : 'btn-secondary']"
+              :disabled="busy" :aria-label="a.label" :title="a.label"
+              @click.stop="a.run()">
+        <span aria-hidden="true">{{ a.icon }}</span>
+        <span v-if="showLabels">{{ a.label }}</span>
+      </button>
+      <!-- iPad 上 title 永远不显示, 所以给一个能点的开关让文字常驻。
+           偏好存 localStorage 并跨所有条目共享 —— 一屏十几条不可能逐个切。 -->
+      <!-- 按下态用现有按钮词汇表达(ghost → secondary), 而不是给图标附加勾号 -->
+      <button :class="['btn btn-touch text-xs', showLabels ? 'btn-secondary' : 'btn-ghost']"
+              :aria-label="showLabels ? '隐藏按钮文字说明' : '显示按钮文字说明'"
+              :aria-pressed="showLabels"
+              :title="showLabels ? '隐藏按钮文字说明' : '显示按钮文字说明'"
+              @click.stop="toggleLabels">
+        <span aria-hidden="true">ⓘ</span>
+      </button>
     </div>
 
     <div v-if="loadErr" class="mt-1 text-xs text-rose-600">{{ loadErr }}</div>
@@ -132,14 +151,16 @@ async function removeItem() {
     <div v-if="open === 'take' || open === 'put'"
          class="mt-1 flex items-center gap-2 bg-slate-50 rounded-lg p-2 flex-wrap" @click.stop>
       <span class="text-xs text-slate-500">{{ open === 'take' ? '取出' : '补库存' }}</span>
-      <button class="btn btn-secondary text-xs" :disabled="busy" @click="bump(-1)">−</button>
-      <span class="font-mono w-8 text-center">{{ qty }}</span>
-      <button class="btn btn-secondary text-xs" :disabled="busy" @click="bump(1)">+</button>
+      <button class="btn btn-secondary btn-touch text-xs" :disabled="busy"
+              aria-label="减少数量" @click="bump(-1)">−</button>
+      <span class="font-mono w-8 text-center" aria-live="polite">{{ qty }}</span>
+      <button class="btn btn-secondary btn-touch text-xs" :disabled="busy"
+              aria-label="增加数量" @click="bump(1)">+</button>
       <span v-if="open === 'take'" class="text-xs"
             :class="quantity > 0 ? 'text-slate-400' : 'text-rose-600'">库存 {{ quantity }}</span>
       <span class="flex-1"></span>
-      <button class="btn btn-secondary text-xs" :disabled="busy" @click="open = ''">取消</button>
-      <button class="btn btn-primary text-xs"
+      <button class="btn btn-secondary btn-touch text-xs" :disabled="busy" @click="open = ''">取消</button>
+      <button class="btn btn-primary btn-touch text-xs"
               :disabled="busy || (open === 'take' && quantity <= 0)"
               @click="open === 'take' ? confirmTake() : confirmPut()">确认</button>
     </div>

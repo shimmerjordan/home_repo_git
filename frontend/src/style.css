@@ -43,6 +43,9 @@
   .btn-ghost     { @apply text-slate-600 hover:bg-slate-100 hover:text-slate-900; }
   /* Accent action — for the rare truly-primary CTA (record, confirm) that should read as the app's voice. */
   .btn-accent    { @apply bg-indigo-600 text-white shadow-sm hover:bg-indigo-500 active:bg-indigo-700; }
+  /* 触控命中区下限。主力设备是 iPad —— .btn 的 px-3.5 py-2 配 text-xs 只有约 36×32px,
+     图标按钮没有文字撑宽, 手指按不准。44px 是可靠命中的最小值。 */
+  .btn-touch     { @apply min-w-[44px] min-h-[44px]; }
 
   /* ---- Form controls ---- */
   .input {

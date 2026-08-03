@@ -5,6 +5,7 @@ import { useVoice } from '../composables/useVoice'
 import { useAudioMeter } from '../composables/useAudioMeter'
 import Waveform from './Waveform.vue'
 import ItemQuickActions from './ItemQuickActions.vue'
+import OperationResults from './OperationResults.vue'
 import { isLowEndDevice } from '../composables/sceneLayout'
 
 // three.js (~600 KB) is only pulled in through Scene3D, and here it renders solely once a
@@ -799,6 +800,10 @@ const inConfirm = computed(() => phase.value === 'confirm-text' || phase.value =
             <span v-if="result.executed" class="tag bg-emerald-100 text-emerald-700">已执行</span>
           </div>
           <div class="text-base text-slate-800 bg-slate-50 rounded-lg p-3">💬 {{ result.speech }}</div>
+
+          <!-- 逐条列出这次到底动了哪些物品, 并允许单条撤销/改判。
+               模糊匹配(打"猜的"角标)最容易出错, 就靠这里纠正。 -->
+          <OperationResults :operations="result.operations || []" @changed="onQuickActionDone" />
 
           <!-- Needs-based recommendations: shows purpose alongside each item, with a
                "看 3D" affordance to scroll the highlight into view. -->

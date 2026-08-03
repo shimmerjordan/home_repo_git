@@ -124,14 +124,21 @@ class IntentRecommendation(BaseModel):
 
 
 class IntentOperationResult(BaseModel):
-    """Per-operation outcome when one utterance contains multiple operations."""
-    intent: str  # find / take_out / put_in / consume / create_item
+    """Per-operation outcome. Filled for single-op utterances too, so the frontend
+    has one uniform shape to render and revise."""
+    intent: str  # find / take_out / put_in / consume / create_item / delete_item
     item_id: Optional[int] = None
     item_name: Optional[str] = None
     quantity: int = 1
     executed: bool = False
     transaction_id: Optional[int] = None
     speech: str = ""
+    # 这条操作匹配到的备选 (命中项排第一)。让用户看清"我操作的是哪个"并能改判。
+    candidates: list[IntentCandidate] = []
+    matched_by: str = ""     # exact | fuzzy | created | none
+    pending: bool = False    # True = 已识别但未执行, 等用户确认 (仅 delete_item)
+    location_path: Optional[str] = None
+    remaining: Optional[int] = None   # 操作后该物品的数量
 
 
 class IntentResult(BaseModel):

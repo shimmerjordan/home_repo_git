@@ -12,6 +12,7 @@ from .routers import diag as diag_router
 from .routers import dingtalk as dingtalk_router
 from .routers import items as items_router
 from .routers import locations as locations_router
+from .routers import revise as revise_router
 from .routers import settings as settings_router
 from .routers import voice as voice_router
 from .services.logbuffer import app_log, install as install_logbuffer
@@ -56,6 +57,7 @@ app.add_middleware(
 app.include_router(items_router.router)
 app.include_router(items_router.recent_router)
 app.include_router(locations_router.router)
+app.include_router(revise_router.router)
 app.include_router(voice_router.router)
 app.include_router(settings_router.router)
 app.include_router(diag_router.router)

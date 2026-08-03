@@ -75,6 +75,15 @@ export const api = {
     request(`/api/locations/${id}`, { method: 'PATCH', body: JSON.stringify(data) }),
   deleteLocation: (id) => request(`/api/locations/${id}`, { method: 'DELETE' }),
 
+  // 操作复核与改判 (撤销一条流水, 或撤销后改到正确目标重做)
+  undoTx: (transactionId) =>
+    request('/api/revise/undo', { method: 'POST', body: JSON.stringify({ transaction_id: transactionId }) }),
+  redirectTx: (transactionId, target) =>
+    request('/api/revise/redirect', {
+      method: 'POST',
+      body: JSON.stringify({ transaction_id: transactionId, target }),
+    }),
+
   // voice
   voiceIntent: (text, context = null) =>
     request('/api/voice/intent', {
