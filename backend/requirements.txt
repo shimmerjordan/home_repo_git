@@ -8,6 +8,14 @@ python-multipart==0.0.12
 # Feishu/Lark Stream Mode SDK — optional; backend gracefully skips the Feishu bot
 # if this package isn't importable (so old images don't break on the new feature).
 lark-oapi==1.4.15
+# websockets 是 uvicorn[standard] 和 lark-oapi 的传递依赖, 两边都没钉上界。
+# 钉死的理由: 飞书长连接的传输层就是它, 而这条链路要真机 + 飞书凭证才测得到 ——
+# 重建镜像时让它自己往上飘, 等于每次部署都在一条测不了的路径上换实现。
+# 16.0 是先前跑通的版本 (旧 storage-backend 容器里就是它)。要升先在飞书上验一遍。
+# 注意 >=14 已经没有 ClientConnection.closed 了 (services/feishu._connection_alive
+# 对新旧两套结构都兜住了), 而 lark 只 except 老的 InvalidStatusCode —— 所以我们
+# 自己接管了重连, 不依赖 lark 对握手异常的分类。
+websockets==16.0
 # WebDAV backup — optional & graceful: webdav4 is the WebDAV client, cryptography
 # does AES-256 backup encryption. If either is missing the backend still boots;
 # only the corresponding capability is unavailable (see services/backup.py).

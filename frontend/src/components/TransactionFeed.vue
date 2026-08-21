@@ -51,6 +51,28 @@ const summary = computed(() => {
   return out
 })
 
+// 回撤一条流水。undoable / undo_note 由服务端算 (见 services/inventory.annotate_undoable):
+// 只有某物品的最后一条 take_out/put_in/consume 撤得回去, 中间被机器人动过就不安全。
+const undoingId = ref(0)
+const undoMsg = ref('')
+async function undoTx(t) {
+  if (!t.undoable || undoingId.value) return
+  const verb = labels[t.action] || t.action
+  if (!confirm(`回撤「${verb} ${t.item_name} ×${t.quantity}」?\n库存恢复到操作前。`
+    + (t.action === 'put_in' ? '\n若这条是新建产生的, 物品档案一并删除。' : ''))) return
+  undoingId.value = t.id
+  undoMsg.value = ''
+  try {
+    const r = await api.undoTx(t.id)
+    undoMsg.value = r?.message || '已回撤'
+    await load()
+  } catch (e) {
+    undoMsg.value = String(e.message || e).replace(/^\d+\s+\w+:\s*/, '')
+  } finally {
+    undoingId.value = 0
+  }
+}
+
 function exportCsv() {
   const cols = ['时间', '动作', '物品', '数量', '位置', '备注']
   const rows = txs.value.map((t) => [
@@ -96,6 +118,7 @@ function exportCsv() {
         <span v-if="summary.consume">用完: <b class="text-rose-600">{{ summary.consume }}</b></span>
         <span v-if="summary.adjust">盘点: <b class="text-blue-600">{{ summary.adjust }}</b></span>
         <span v-if="loading" class="text-slate-400">加载中…</span>
+        <span v-if="undoMsg" class="text-emerald-700">{{ undoMsg }}</span>
       </div>
       <div class="flex gap-2">
         <button class="btn btn-secondary text-xs" @click="clearFilters">清空筛选</button>
@@ -114,6 +137,7 @@ function exportCsv() {
             <th class="text-right p-2">数量</th>
             <th class="text-left p-2">位置</th>
             <th class="text-left p-2">备注</th>
+            <th class="text-right p-2">操作</th>
           </tr>
         </thead>
         <tbody>
@@ -124,8 +148,16 @@ function exportCsv() {
             <td class="p-2 text-right font-mono">{{ t.quantity }}</td>
             <td class="p-2 text-slate-600">{{ t.location_path || '—' }}</td>
             <td class="p-2 text-slate-500">{{ t.note }}</td>
+            <td class="p-2 text-right">
+              <button class="btn btn-secondary text-xs"
+                      :disabled="!t.undoable || undoingId === t.id"
+                      :title="t.undoable ? '撤销这条, 库存恢复到操作前' : (t.undo_note || '无法回撤')"
+                      @click="undoTx(t)">
+                {{ undoingId === t.id ? '…' : '↩ 回撤' }}
+              </button>
+            </td>
           </tr>
-          <tr v-if="!txs.length"><td colspan="6" class="p-8 text-center text-slate-400">无匹配记录</td></tr>
+          <tr v-if="!txs.length"><td colspan="7" class="p-8 text-center text-slate-400">无匹配记录</td></tr>
         </tbody>
       </table>
     </div>

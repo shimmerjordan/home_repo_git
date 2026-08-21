@@ -16,12 +16,22 @@
    - TTS 播报问句 + 同时启动 yes/no 单次识别(interim 早退,3.5s 超时)
    - 你可以**口头说** "确定/确认/对/是/好/行/yes/ok" 或 "取消/不对/算了/no",**也可以点按钮**
    - **30 秒沉默** 自动确认(只在 "发送前确认" 阶段;"低置信度执行确认" 不自动 yes,避免误操作)
-4. **AI 解析意图** → 执行
-5. **低置信度二次确认** *阈值默认 0.5*
+4. **AI 解析意图** → 出方案(默认)或直接执行
+5. **落库前逐条确认** *默认开启,设置页可关*
+   - 会改数据的操作(取出/存入/用完/新增/删除)**一个字都不先写库**,后端只返回
+     `stage="plan"` 的方案,由「最新识别结果」的确认卡片接手
+   - 每条一张卡:动作徽标 + 数量 + 候选下拉(含「新建」)+ 位置 + 跳过
+   - **名字相近时默认建新物品**。说「存入洗发水」而库里只有「洗手液」时预选"新建洗发水",
+     洗手液只列在下面 —— 模糊匹配自动加库存是误操作的头号来源
+   - 确认后 `POST /api/voice/apply` **单事务**执行,要么全成要么全不动
+   - 查找/推荐是只读的不受影响;群机器人没界面可点,始终直接执行
+6. **低置信度二次确认** *阈值默认 0.5, 仅在关掉上一条时生效*
    - LLM 返回 `confidence < threshold` 且是修改性操作(取出/存入)时,先不动数据,弹卡片 + 语音播报问 "是想 X 吗",同样支持口头/按钮二选一
    - 模糊匹配时给候选物品列表,可点 "选这个"
-6. **需求型问答**: "我发烧了家里有什么药" 这种问句会走 `assist` 意图,返回带"用途"列的推荐表,并在 3D 视图里同时高亮所有相关物品
-7. **批量操作**: 一句话涉及多个物品时,**所有操作类型都支持批量**——查找/取出/存入/消耗/新建可任意混合(如 "把手表、铅笔、橡皮放进书桌1"、"我消耗了一瓶水和两片药"、"手表和铅笔在哪")。LLM 返回 `operations` 数组,后端逐条执行并汇总播报;目标位置支持按名称解析("书桌1" 自动对应位置 id);批量存入时库存里没有的物品会自动新建到目标位置;部分失败时话术如实说明哪条没找到。含修改操作且低置信度时整批待确认(纯查询不拦截),确认后一次性执行
+7. **需求型问答**: "我发烧了家里有什么药" 这种问句会走 `assist` 意图,返回带"用途"列的推荐表,并在 3D 视图里同时高亮所有相关物品
+8. **批量操作**: 一句话多个物品时全部类型都支持混合(如 "把手表、铅笔、橡皮放进书桌1"、
+   "我用完了洗手液, 拿了螺丝刀和卷尺"、"手表和铅笔在哪")。LLM 返回 `operations` 数组,
+   逐条处理后汇总播报;位置支持按名称解析("书桌1" → 位置 id);部分失败时话术如实说明哪条没成
 
 ## LLM 接入(完全可配置)
 
@@ -33,13 +43,56 @@
 - 自动用工具调用(OpenAI `tool_calls` / Anthropic `tool_use`),模型不支持时降级为 JSON 模式
 - "测试连接"按钮一键验证
 
+### max_tokens 别调小
+
+带思考的模型(Claude Opus/Sonnet)光 thinking 就吃掉大半输出预算,4 个物品的批量操作
+实测要 490~550 output tokens。512 时会被截断,而截断的 `tool_use` input 是半截 JSON,
+`operations` 整个变空 —— 用户说了四件事后端一件都没收到,却仍按"成功"往下走。
+**这就是多物品操作不准的头号原因。**
+
+| 语句 | max_tokens | stop_reason | operations |
+|---|---|---|---|
+| 把手表、铅笔、橡皮、订书机、计算器放进书桌1 | 512 | **max_tokens** | 5(侥幸完整) |
+| 我用完了洗手液, 拿了螺丝刀和卷尺, 把两个充电器放回书桌1 | 512 | **max_tokens** | **0(全丢)** |
+| 同上 | 2048 | tool_use | 4(全对) |
+
+现在:默认 4096(上限 16384,设置页下限 2048);已存在的 `config.json` 里低于 2048
+的值**载入时自动抬到 4096**(只改默认值对现有配置无效);`client.py` 检查
+`stop_reason`/`finish_reason`,截断就用 4 倍预算自动重试一次。
+
 ### 加速 Tips
 
 - **极速模式**: 设置页勾选,精简系统提示 + 减少给 AI 的候选物品数
-- **max_tokens 256~512** 一般中文够用
 - **轻量模型**: glm-4-flash / qwen2.5-7b-instruct / siliconflow 上的 Qwen 系列
 - **关掉"发送前确认"** 省一次往返(但容易误识别就直接执行)
 - **关掉"朗读 AI 结果"** 省 TTS 播放等待
+
+## 准确度评测台 (`backend/eval/`)
+
+32 条标注语句 + 一份带"易混对"的夹具库存(充电宝/充电器、洗手液/洗发水、螺丝刀/螺丝、
+两处都有的电池、库存为 0 的抽纸),跑 `parse_intent` + `plan_operations`,逐条比对
+意图 / 操作条数 / 每条落点 / 数量 / 位置,按分类出准确率。不落库(每个 case 一份内存 sqlite)。
+
+```bash
+# 源码 bind mount 进去跑, 不用重建镜像。CONFIG_PATH 要指向可写目录
+docker run --rm -v "$PWD/backend:/src" -v /tmp/ev:/cfg -w /src \
+  -e CONFIG_PATH=/cfg/config.json storage-app python -m eval.run_eval
+
+python -m eval.run_eval --replay              # 离线回放录好的 cassette (CI 用这条)
+python -m eval.run_eval --compare             # max_tokens 512 vs 4096 对比
+python -m eval.run_eval --only multi,mixed    # 只跑最难的两类
+python -m eval.run_eval --case mixed-4        # 只跑一条, 调 prompt 时用
+```
+
+分类:`single / multi / mixed / confusable / force_new / restock / ambiguous / absent / readonly`。
+第一次跑会把真实响应录进 `eval/cassettes/`,之后 `--replay` 离线复现同一份结果 ——
+模型参数钉在 `eval/eval_config.json` 里,不跟着 `data/config.json` 飘,否则 cassette 全 miss。
+
+单元测试(不联网、不要 key):
+
+```bash
+docker run --rm -v "$PWD/backend:/src" -w /src/tests storage-app python -m unittest discover -s .
+```
 
 ## iOS / iPad 注意事项
 

@@ -1,35 +1,104 @@
 # 部署、配置、故障排查
 
-## 快速启动
+## 部署
+
+两种方式,数据目录和端口完全一样,随时可以互换。
+
+### A. 用发布的镜像(推荐,不编译)
 
 ```bash
-cd repo_git
-./start.sh                 # 启动 (后台)
-./start.sh --whisper       # 同时启动本地 Whisper STT 服务
-./start.sh --logs          # 启动后跟随日志
-./start.sh stop            # 停止
-./start.sh restart         # 重启
-./start.sh logs            # 跟随日志
-./start.sh ps              # 查看容器状态
-APP_PORT=9443 ./start.sh     # 自定义 HTTPS 端口
-HTTP_PORT=8090 ./start.sh    # 自定义 HTTP 端口
+mkdir -p voice-storage && cd voice-storage
+curl -fLO https://github.com/shimmerjordan/home_repo_git/releases/latest/download/compose.yml
+printf 'LAN_IP=%s\n' "$(hostname -I | awk '{print $1}')" > .env
+docker compose up -d
 ```
 
-暴露**两个端口**(均可改),不强制 HTTPS。后端、Whisper 都仅在 docker 内网:
+Release 页那份 `compose.yml` 的 `image` **钉死版本号**(发布流水线从
+[`deploy/compose.release.yml`](../deploy/compose.release.yml) 生成),所以下次 `up -d`
+不会莫名换版本。升级 = 改 `image` 那一行或重新下新版本的文件,然后 `up -d`。
 
-- **HTTP `8080`** — 日常访问,无自签证书弹窗。注意:浏览器麦克风语音 (getUserMedia / SpeechRecognition) 要求 secure context,HTTP 下用不了(localhost 除外);文字输入、查看、3D、群机器人都不受影响
-- **HTTPS `8443`** — 需要在 iPad / 手机浏览器上用语音时走这个。第一次会有自签证书警告,点 **高级 → 继续访问** 信任即可(证书持久化在 `./data/certs/`,以后不再重生成)
+`.env` 认 `LAN_IP` / `HTTP_PORT` / `APP_PORT` / `TZ`。
 
-## 端口约定
+### B. 从源码编译
 
-| 服务 | 容器内 | 对外 |
-|---|---|---|
-| 前端 nginx HTTP | 80 | `${HTTP_PORT:-8080}` |
-| 前端 nginx HTTPS | 443 | `${APP_PORT:-8443}` |
-| 后端 FastAPI | 8000 | 仅内网 |
-| Whisper (可选) | 9000 | 仅内网 |
+```bash
+./start.sh              # 启动 (后台)
+./start.sh --whisper    # 带本地 Whisper STT
+./start.sh stop|restart|logs|ps
+APP_PORT=9443 HTTP_PORT=8090 ./start.sh    # 改端口
+```
 
-API 文档:`http://<host>:8080/docs` 或 `https://<host>:8443/docs` (nginx 反代)
+`LAN_IP` 由 `start.sh` 自动探测。**改了前端也要重建镜像** —— dist 是在镜像里 build 的。
+
+## 从"前后端两个容器"迁过来
+
+老版本跑 `storage-frontend` + `storage-backend`。**数据、配置、设置全部原样复用,不需要导出导入** ——
+它们本来就都在宿主机的 `./data` 里,新容器挂的是同一个目录。
+
+```bash
+cd <原来放 docker-compose.yml 的目录>
+sudo tar czf ../data-backup-$(date +%F).tgz data    # 保险
+docker compose down --remove-orphans                # 停掉旧的两个容器
+```
+
+然后按上面 A 或 B 起新的:
+
+- **走 A(镜像)**:把 `compose.yml` 放到**和 `data/` 同级**,`up -d`。同级是硬要求,
+  `./data:/app/data` 才挂得上同一份数据
+- **走 B(源码)**:`git pull && ./start.sh`,`start.sh` 自带 `--remove-orphans`,旧容器会被清掉
+
+会变的只有一件事:`config.json` 里 `llm.max_tokens` 低于 2048 会被自动抬到 4096
+(太小会截断 AI 输出,多物品操作整批丢失),启动日志里打一行说明。其余配置一个字不动。
+
+不变的:端口 8080/8443、`data/` 布局、`data/certs` 里的本地 CA ——
+**iPad 上装过的证书继续有效**。
+
+验证:
+
+```bash
+docker compose ps                              # storage-app 应为 healthy
+curl -s localhost:8080/api/diag | head -c 300  # 物品/位置/流水条数应与迁移前一致
+```
+
+旧镜像可以清了:`docker image prune`。
+
+## 端口与容器
+
+| 服务 | 容器 | 容器内 | 对外 |
+|---|---|---|---|
+| nginx HTTP | `storage-app` | 80 | `${HTTP_PORT:-8080}` |
+| nginx HTTPS | `storage-app` | 443 | `${APP_PORT:-8443}` |
+| 后端 FastAPI | `storage-app` | `127.0.0.1:8000` | 不暴露 |
+| Whisper (可选) | `storage-whisper` | 9000 | 仅 docker 内网 |
+
+- **HTTP 8080** — 日常访问,无证书弹窗。浏览器麦克风要求 secure context,所以 HTTP 下
+  用不了语音(localhost 除外);文字输入、3D、群机器人都不受影响
+- **HTTPS 8443** — iPad / 手机用语音走这个。装一次 `http://<IP>:8080/ca.crt` 这个本地根 CA
+  就彻底没弹窗;不装就点"高级 → 继续访问"。CA 只生成一次,服务器证书每次启动按 `LAN_IP`
+  重签(同一个 CA 签的,设备端不用重装)
+
+nginx 和 uvicorn 由 supervisord 一起带起(`deploy/supervisord.conf`),`./start.sh logs`
+两个进程的日志都能看到;单独重启某一个:
+`docker exec storage-app supervisorctl -c /etc/supervisor/conf.d/supervisord.conf restart backend`。
+Whisper 的**服务名不能改** —— 后端按 docker DNS 名 `http://whisper:9000` 找它。
+
+API 文档:`http://<host>:8080/docs`。
+
+## 发版 (维护者)
+
+```bash
+# 写好 docs/changelog.md, 然后
+git tag v0.8.0 && git push origin v0.8.0
+```
+
+`.github/workflows/release.yml` 会:跑 `ci.yml` 当闸门 → 构建 amd64+arm64 推 GHCR →
+用 `.github/release-notes.md` 当 release 正文 → 附上版本钉死的 `compose.yml`。
+
+**第一次发布后必须手动**把 GHCR 包设成 Public
+([包设置](https://github.com/shimmerjordan/home_repo_git/pkgs/container/home_repo_git)
+→ Change visibility),否则别人 pull 会 `unauthorized`。
+
+发布页文案改 [`.github/release-notes.md`](../.github/release-notes.md)。
 
 ## 首次配置
 
@@ -40,7 +109,7 @@ API 文档:`http://<host>:8080/docs` 或 `https://<host>:8443/docs` (nginx 反�
 2. 填入 API Key、调整 model
 3. 点 **测试连接** — 应该返回一个简短回答证明通了
 4. 不支持 tool calling 的模型(如老 Ollama)取消勾选 "支持工具调用"
-5. 加速:勾选 **极速模式** + 把 `max_tokens` 调到 256~512
+5. 加速:勾选 **极速模式**。`max_tokens` **别调低于 2048**,太小会截断输出导致多物品操作丢条目
 
 ### 语音配置
 - 唤醒词,逗号分隔(默认 `小库,小仓,管家`)
@@ -57,15 +126,18 @@ API 文档:`http://<host>:8080/docs` 或 `https://<host>:8443/docs` (nginx 反�
 ## 数据持久化
 
 ```
-./data/
+./data/                # 整个目录挂到容器 /app/data, 是唯一的挂载点
 ├── storage.db       # SQLite 数据库
 ├── config.json      # LLM / 语音 / 机器人运行时配置 (含 API key,自行注意权限)
+├── logs/            # 后端日志
 └── certs/
-    ├── server.crt   # 自签证书 (持久化, 不会每次重建)
+    ├── ca.crt       # 本地根 CA (装到 iPad 上的就是它, 存在就绝不重新生成)
+    ├── ca.key
+    ├── server.crt   # 每次启动按当前 LAN_IP 重签, CA 不变所以设备无需重装
     └── server.key
 ```
 
-备份只需要 tar 这一个目录。
+备份只需要 tar 这一个目录(属主是 root,要 `sudo`)。
 
 ### 数据兼容性
 

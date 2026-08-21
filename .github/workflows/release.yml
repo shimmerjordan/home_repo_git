@@ -1,0 +1,157 @@
+# 打个 v* 的 tag 就发一版:跑测试 → 构建多架构镜像推 GHCR → 建 Release
+# (正文用 .github/release-notes.md,并把版本钉死的 compose.yml 作为资产附上)。
+#
+#   git tag v0.8.0 && git push origin v0.8.0
+#
+# 发布页要让人能直接抄的东西就两样: 一个 compose.yml 和几行命令。所以这里的重点
+# 不是构建, 而是把 compose.yml 的 image 替换成带版本号的地址后上传成资产 ——
+# 用户下到的那份是钉死版本的, 不会因为我们改了 latest 而在下次 up -d 时变身。
+name: Release
+
+on:
+  push:
+    tags: ['v*']
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: '要发布的版本号 (如 v0.8.0), 必须是已存在的 tag'
+        required: true
+
+permissions:
+  contents: write     # 建 release / 传资产
+  packages: write     # 推 GHCR
+
+jobs:
+  # 发布前的闸门: 测试不过就不发。复用 ci.yml, 不重复写一遍。
+  # 注意: 走 workflow_dispatch 手动发布时, 这个 gate 跑的是**发起 dispatch 那个分支**
+  # 的代码, 不是 inputs.tag 指向的 commit。正常路径 (推 tag) 两者一致, 不受影响。
+  gate:
+    uses: ./.github/workflows/ci.yml
+
+  publish:
+    needs: gate
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.inputs.tag || github.ref }}
+
+      - name: 算出版本号、镜像 tag 列表
+        id: meta
+        # 走 env 而不是把 ${{ }} 直接插进 shell: tag 名是外部输入, 直接内插等于给
+        # 脚本开了注入口子 (GitHub 官方也建议这么写)。
+        env:
+          VERSION_IN: ${{ github.event.inputs.tag || github.ref_name }}
+          REPO_IN: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+          VERSION="${VERSION_IN}"
+          # GHCR 的路径必须全小写, 而 GitHub 用户名/仓库名可能带大写。
+          REPO_LC="$(echo "${REPO_IN}" | tr '[:upper:]' '[:lower:]')"
+          IMAGE="ghcr.io/${REPO_LC}:${VERSION}"
+
+          # 预发布 (-rc / -beta / -alpha) **不能动 latest**, 否则按 latest 部署的人
+          # 会被悄悄拖到一个 rc 版本上去。
+          case "${VERSION}" in
+            *-rc*|*-beta*|*-alpha*) PRERELEASE=true ;;
+            *)                      PRERELEASE=false ;;
+          esac
+
+          TAGS="${IMAGE}"
+          if [ "${PRERELEASE}" = false ]; then
+            TAGS="${TAGS}"$'\n'"ghcr.io/${REPO_LC}:latest"
+          fi
+
+          {
+            echo "version=${VERSION}"
+            echo "repo=${REPO_IN}"
+            echo "image=${IMAGE}"
+            echo "prerelease=${PRERELEASE}"
+            # 多行 output 必须用带定界符的写法, 直接 echo "tags=a\nb" 会被截断。
+            echo "tags<<__TAGS_EOF__"
+            echo "${TAGS}"
+            echo "__TAGS_EOF__"
+          } >> "$GITHUB_OUTPUT"
+
+          echo "版本=${VERSION} 预发布=${PRERELEASE}"
+
+      - uses: docker/setup-qemu-action@v3
+        with:
+          platforms: arm64
+
+      - uses: docker/setup-buildx-action@v3
+
+      - uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: 构建并推送 (amd64 + arm64)
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          push: true
+          platforms: linux/amd64,linux/arm64
+          # 前端那一段在 Dockerfile 里钉了 --platform=$BUILDPLATFORM, 所以
+          # npm install + vite build 只在 amd64 runner 上原生跑一次, 不进 QEMU。
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: |
+            org.opencontainers.image.title=Voice Storage
+            org.opencontainers.image.description=家庭杂物仓储管理 (语音/钉钉/Telegram/飞书 + 3D 可视化)
+            org.opencontainers.image.source=https://github.com/${{ github.repository }}
+            org.opencontainers.image.version=${{ steps.meta.outputs.version }}
+            org.opencontainers.image.licenses=AGPL-3.0-or-later
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      - name: 生成版本钉死的 compose.yml 和发布正文
+        env:
+          V: ${{ steps.meta.outputs.version }}
+          IMG: ${{ steps.meta.outputs.image }}
+          REPO: ${{ steps.meta.outputs.repo }}
+        run: |
+          set -euo pipefail
+          mkdir -p dist
+          # compose 模板里的 __IMAGE__ 换成带版本号的镜像地址
+          sed "s|__IMAGE__|${IMG}|g" deploy/compose.release.yml > dist/compose.yml
+          # 发布正文里的三个占位符
+          sed -e "s|__VERSION__|${V}|g" \
+              -e "s|__IMAGE__|${IMG}|g" \
+              -e "s|__REPO__|${REPO}|g" \
+              .github/release-notes.md > dist/RELEASE_BODY.md
+          # 占位符必须一个不剩, 否则发布页会出现 __VERSION__ 这种东西
+          if grep -n '__VERSION__\|__IMAGE__\|__REPO__' dist/compose.yml dist/RELEASE_BODY.md; then
+            echo "::error::还有没替换掉的占位符" && exit 1
+          fi
+          # compose.yml 自己必须是合法的 (拿它 config 一下; 缺 .env 不影响校验)
+          docker compose -f dist/compose.yml config -q
+          echo '✅ compose.yml 校验通过'
+
+      - name: 建 Release 并附上 compose.yml
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ steps.meta.outputs.version }}
+          name: ${{ steps.meta.outputs.version }}
+          body_path: dist/RELEASE_BODY.md
+          files: dist/compose.yml
+          draft: false
+          prerelease: ${{ steps.meta.outputs.prerelease }}
+
+      - name: 收尾提示
+        env:
+          V: ${{ steps.meta.outputs.version }}
+          TAGS: ${{ steps.meta.outputs.tags }}
+        run: |
+          {
+            echo "## 发布完成 ${V}"
+            echo
+            echo '推上去的镜像 tag:'
+            echo '```'
+            echo "${TAGS}"
+            echo '```'
+            echo
+            echo '> **第一次发布记得把包设成 Public**:'
+            echo '> Packages → 这个包 → Package settings → Change visibility → Public。'
+            echo '> 否则别人 `docker compose pull` 会拿到 `unauthorized`,必须先 `docker login ghcr.io`。'
+          } >> "$GITHUB_STEP_SUMMARY"

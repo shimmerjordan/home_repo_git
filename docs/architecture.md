@@ -7,16 +7,18 @@
                  │
                  ▼
     ┌────────────────────────────┐
-    │  nginx (443, 自签证书)      │   ← 唯一对外端口
+    │  容器 storage-app           │   ← entrypoint.sh 先签证书, 再 exec supervisord 带起下面两个进程
+    ├────────────────────────────┤
+    │  nginx (80 / 443, 自签证书) │   ← 唯一对外端口
     │  ├─ /          静态 Vue 3   │
+    │  ├─ /ca.crt    本地 CA      │   ← iPad 装这个
     │  └─ /api/, /docs → 反代     │
-    └──────────────┬─────────────┘
-                   │ docker network (内部)
-    ┌──────────────┴─────────────┐
-    │  FastAPI :8000              │
+    │              │ 同容器回环   │   ← 127.0.0.1:8000, 不走 docker network
+    ├──────────────┴─────────────┤
+    │  FastAPI 127.0.0.1:8000     │   ← 不暴露到容器外
     │  ├─ /api/items, /locations  │
     │  ├─ /api/voice/intent       │
-    │  ├─ /api/voice/transcribe ──┼──► Whisper :9000 (可选 profile)
+    │  ├─ /api/voice/transcribe ──┼──► Whisper :9000 (独立容器 storage-whisper, 可选 profile)
     │  ├─ /api/dingtalk/webhook   │ ← 钉钉 inbound
     │  ├─ /api/settings           │
     │  ├─ /api/diag, /api/logs    │
@@ -25,11 +27,16 @@
     │  ├─ Telegram poller ────────┼──► api.telegram.org (outbound)
     │  └─ Feishu WS supervisor ───┼──► open.feishu.cn (outbound, lark-oapi)
     └──────────────┬─────────────┘
-                   │
+                   │ 唯一挂载: ./data → /app/data
         ./data/storage.db (SQLite)
         ./data/config.json (运行时配置)
-        ./data/certs/      (自签证书)
+        ./data/logs/       (后端日志)
+        ./data/certs/      (本地 CA + 服务器证书)
 ```
+
+前后端原先是 `storage-frontend` + `storage-backend` 两个容器,现在合成一个 `storage-app`:
+省掉一次跨容器 HTTP、少一份镜像、日志在一处。Whisper 仍是独立容器 —— 它镜像大、启动慢、
+按 profile 可选,且后端靠 docker DNS 名 `whisper` 找它,**服务名不能改**。
 
 ## 上下文摘要(防 token 爆炸)
 
@@ -46,7 +53,13 @@
 ```
 repo_git/
 ├── start.sh                          # 一键启动/停止/日志
-├── docker-compose.yml
+├── docker-compose.yml                # app (前后端合一) + whisper (可选 profile)
+├── Dockerfile                        # 多阶段: node 打前端 → python 装后端 + nginx + supervisor
+├── deploy/                           # 只在镜像里用到的运行时配置
+│   ├── entrypoint.sh                 # CMD: 先签本地 CA/服务器证书, 再 exec supervisord
+│   ├── supervisord.conf              # 一个容器带两个进程: uvicorn + nginx
+│   ├── nginx.conf                    # 80 / 443 两个 server + TLS 证书路径
+│   └── app-routes.conf               # 两个 server 共用的路由, /api 反代 127.0.0.1:8000
 ├── README.md                         # 入口 + 链到 docs/
 ├── docs/                             # 模块化文档
 │   ├── architecture.md               # 本文档
@@ -61,7 +74,6 @@ repo_git/
 │       └── feishu.md
 │
 ├── backend/
-│   ├── Dockerfile
 │   ├── requirements.txt
 │   └── app/
 │       ├── main.py                   # FastAPI 入口 + access log + 启动钩子
@@ -88,10 +100,7 @@ repo_git/
 │           ├── audit.py              # 审计日志查询
 │           └── dingtalk.py           # 钉钉 inbound webhook
 │
-└── frontend/
-    ├── Dockerfile
-    ├── entrypoint.sh                 # 启动时自动生成自签证书
-    ├── nginx.conf                    # HTTPS + /api 反代
+└── frontend/                         # 纯前端源码, 构建产物由根 Dockerfile 打进镜像
     ├── vite.config.js
     ├── tailwind.config.js
     ├── postcss.config.js
@@ -138,8 +147,15 @@ repo_git/
 
 ## 启动顺序
 
-1. `Base.metadata.create_all` — SQLAlchemy 建表
-2. `_ensure_columns()` — SQLite mini-migration,补缺失列、回填 UUID
-3. `_migrate_to_home()` — 一次性数据迁移:无 home 但有 root 位置时,创建"我家"并把所有 root 改 parent
-4. FastAPI 启动钩子:`telegram.start()` + `feishu.start()` 异步常驻
-5. nginx 静态资源 + `/api/*` 反代到 8000
+容器级(`deploy/entrypoint.sh` → `deploy/supervisord.conf`):
+
+1. `/app/data/certs` 里已有 `ca.key` + `ca.crt` 就**直接复用**,没有才生成 —— iPad 上装过的信任靠这个不失效
+2. 按当前 `LAN_IP` 重签服务器证书(SAN 里带上局域网 IP),把 `ca.crt` 拷到 web 根目录供下载
+3. `exec supervisord`:`backend` (priority 10) 比 `nginx` (priority 20) 先 spawn,但 supervisord 不等前一个就绪,所以后端 bind 8000 之前 `/api` 会有几秒 502(静态页正常);任一进程挂了自动重拉
+
+后端进程内(`backend/app/main.py`):
+
+4. `Base.metadata.create_all` — SQLAlchemy 建表
+5. `_ensure_columns()` — SQLite mini-migration,补缺失列、回填 UUID
+6. `_migrate_to_home()` — 一次性数据迁移:无 home 但有 root 位置时,创建"我家"并把所有 root 改 parent
+7. FastAPI 启动钩子:`telegram.start()` + `feishu.start()` 异步常驻

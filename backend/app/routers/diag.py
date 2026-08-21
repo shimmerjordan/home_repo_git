@@ -47,7 +47,7 @@ def diagnostics(db: Session = Depends(get_db)):
     items = db.query(models.Item).count()
     locs = db.query(models.Location).count()
     txs = db.query(models.Transaction).count()
-    return {
+    out = {
         "python": sys.version.split()[0],
         "platform": platform.platform(),
         "database_url": os.getenv("DATABASE_URL", ""),
@@ -65,3 +65,11 @@ def diagnostics(db: Session = Depends(get_db)):
             "whisper_url": cfg.voice.whisper_url,
         },
     }
+    # 飞书 Stream Mode 长连接健康度 (connected / uptime / 退避 / 被抑制的刷屏日志)。
+    # lark-oapi 是可选依赖, 用 try/except 兜住 —— 它 import 失败不能把诊断接口带塌。
+    try:
+        from ..services import feishu as _fs
+        out["feishu"] = _fs.health()
+    except Exception as exc:  # noqa: BLE001
+        out["feishu"] = {"error": str(exc)}
+    return out

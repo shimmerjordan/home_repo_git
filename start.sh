@@ -10,12 +10,14 @@
 set -euo pipefail
 cd "$(dirname "$0")"
 
-CMD=(up -d --build)
+# --remove-orphans: 前后端合并成 storage-app 之后, 顺手清掉上一版留下的
+# storage-backend / storage-frontend 容器, 否则它们会继续占着 8080/8443。
+CMD=(up -d --build --remove-orphans)
 PROFILES=()
 FOLLOW=false
 
 case "${1:-}" in
-  stop)    docker compose down; exit 0 ;;
+  stop)    docker compose down --remove-orphans; exit 0 ;;
   restart) docker compose restart; exit 0 ;;
   logs)    docker compose logs -f --tail=200; exit 0 ;;
   ps)      docker compose ps; exit 0 ;;

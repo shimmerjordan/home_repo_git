@@ -4,7 +4,7 @@ from __future__ import annotations
 import json
 from typing import Iterable
 
-from sqlalchemy import or_
+from sqlalchemy import func, or_
 from sqlalchemy.orm import Session
 
 from .. import models
@@ -66,6 +66,10 @@ def serialize_location(loc: models.Location) -> dict:
     }
 
 
+# 只有这三种流水存得下"操作前的值", 才回滚得回去 (与 routers/revise.py 保持一致)。
+UNDOABLE_ACTIONS = {"take_out", "put_in", "consume"}
+
+
 def serialize_transaction(tx: models.Transaction) -> dict:
     return {
         "id": tx.id,
@@ -77,7 +81,52 @@ def serialize_transaction(tx: models.Transaction) -> dict:
         "location_path": location_path(tx.location) if tx.location else None,
         "note": tx.note or "",
         "created_at": tx.created_at,
+        # 先给个保守默认。列表接口会用 annotate_undoable 批量覆盖成真实值。
+        "undoable": False,
+        "undo_note": "",
     }
+
+
+def annotate_undoable(db: Session, rows: list[dict]) -> list[dict]:
+    """给一批已序列化的流水标上"能不能回撤"。
+
+    判据与 /api/revise/undo 的护栏完全一致:
+      1. action 必须是 take_out / put_in / consume (adjust 没存操作前的数量);
+      2. 必须是该物品**最后一条**流水 —— 否则按原数量反算会得到错误库存
+         (中间可能有飞书机器人又存入过);
+      3. 物品还在。
+
+    第 2 条前端算不出来: 它只拿到最近 N 条, 看不到窗口外的更晚流水。
+    这里用一条 GROUP BY 拿到每个物品的最后一条 id, 不做 N+1。
+    """
+    if not rows:
+        return rows
+    item_ids = {r["item_id"] for r in rows if r.get("item_id")}
+    if not item_ids:
+        return rows
+    latest: dict[int, int] = dict(
+        db.query(models.Transaction.item_id, func.max(models.Transaction.id))
+        .filter(models.Transaction.item_id.in_(item_ids))
+        .group_by(models.Transaction.item_id)
+        .all()
+    )
+    alive = {
+        i for (i,) in db.query(models.Item.id).filter(models.Item.id.in_(item_ids)).all()
+    }
+    for r in rows:
+        if r["action"] not in UNDOABLE_ACTIONS:
+            r["undoable"] = False
+            r["undo_note"] = f"「{r['action']}」记录没保存操作前的数量, 无法回撤"
+        elif r["item_id"] not in alive:
+            r["undoable"] = False
+            r["undo_note"] = "对应的物品已被删除, 无法回撤"
+        elif latest.get(r["item_id"]) != r["id"]:
+            r["undoable"] = False
+            r["undo_note"] = f"「{r['item_name']}」在这之后又被动过, 无法安全回撤"
+        else:
+            r["undoable"] = True
+            r["undo_note"] = ""
+    return rows
 
 
 # --- Search helpers (keyword-based pre-filter for LLM intent) ---

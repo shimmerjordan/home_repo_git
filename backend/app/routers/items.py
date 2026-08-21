@@ -5,12 +5,13 @@ from datetime import datetime
 
 from fastapi import APIRouter, Depends, File, HTTPException, Query, UploadFile
 from fastapi.responses import StreamingResponse
-from sqlalchemy.orm import Session
+from sqlalchemy.orm import Session, joinedload
 
 from .. import models, schemas
 from ..database import get_db
 from ..services import audit
 from ..services.inventory import (
+    annotate_undoable,
     location_path,
     search_items,
     serialize_item,
@@ -261,7 +262,11 @@ def list_items(
     db: Session = Depends(get_db),
 ):
     if q:
-        rows = search_items(db, q, limit=limit)
+        # include_depleted 必须传进去: search_items 内部**默认就把 quantity=0 过滤掉**,
+        # 不传的话下面那两个后置过滤根本没机会生效 —— 结果是 "物品页按名字搜一个用完的
+        # 东西搜不到"(它明明传了 include_depleted=true), 而 only_depleted + q 恒返回空。
+        rows = search_items(db, q, limit=limit,
+                            include_depleted=include_depleted or only_depleted)
     else:
         query = db.query(models.Item)
         if location_id is not None:
@@ -392,7 +397,7 @@ def list_transactions(item_id: int, db: Session = Depends(get_db)):
         .order_by(models.Transaction.created_at.desc())
         .all()
     )
-    return [serialize_transaction(r) for r in rows]
+    return annotate_undoable(db, [serialize_transaction(r) for r in rows])
 
 
 # Global recent transactions feed.
@@ -412,6 +417,11 @@ def recent_transactions(
 ):
     query = db.query(models.Transaction).join(
         models.Item, models.Transaction.item_id == models.Item.id, isouter=True
+    ).options(
+        # 序列化每行都要读 tx.item.name 和 tx.location —— 不预加载就是 2N 条查询。
+        # 近期记录列表每 30s 轮询一次, 这个开销是白付的。
+        joinedload(models.Transaction.item),
+        joinedload(models.Transaction.location),
     )
     if action:
         query = query.filter(models.Transaction.action == action)
@@ -435,7 +445,7 @@ def recent_transactions(
         except ValueError:
             pass
     rows = query.order_by(models.Transaction.created_at.desc()).limit(limit).all()
-    return [serialize_transaction(r) for r in rows]
+    return annotate_undoable(db, [serialize_transaction(r) for r in rows])
 
 
 @recent_router.get("/pending-returns")

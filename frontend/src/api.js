@@ -90,6 +90,15 @@ export const api = {
       method: 'POST',
       body: JSON.stringify({ text, context }),
     }),
+  // 只出"待确认方案", 一个字都不落库。后端还会再看一次 voice.confirm_before_apply,
+  // 关掉的话即使传了 plan_only 也会走直接执行 —— 开关的最终裁决权在服务端。
+  voicePlan: (text) =>
+    request('/api/voice/intent', {
+      method: 'POST',
+      body: JSON.stringify({ text, context: { plan_only: true } }),
+    }),
+  voiceApply: (body) =>
+    request('/api/voice/apply', { method: 'POST', body: JSON.stringify(body) }),
   transcribe: async (blob) => {
     const fd = new FormData()
     fd.append('audio', blob, 'rec.webm')

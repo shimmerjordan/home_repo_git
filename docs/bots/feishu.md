@@ -84,18 +84,45 @@
 ```
 FastAPI startup
    └─ feishu.start()
-      └─ asyncio.create_task(_supervisor)            # 每 5s 检查配置
+      └─ asyncio.create_task(_supervisor)            # 每 15s 检查配置 + 连接健康
          └─ enabled 且凭证有效?
               └─ threading.Thread → _run_ws_client   # lark 阻塞 API 必须用线程
-                  └─ lark.ws.Client(app_id, app_secret).start()   # 阻塞,内部维持心跳
+                  └─ 自建 loop 并覆写 lark.ws.client.loop  # 关键, 见下
+                  └─ lark.ws.Client(..., auto_reconnect=False).start()   # 阻塞
                      └─ event_handler.register_p2_im_message_receive_v1(_handle_message_event)
-                         └─ 收到消息 → asyncio.run_coroutine_threadsafe(_run_intent, main_loop)
+                         └─ 收到消息 → asyncio.run_coroutine_threadsafe(_handle_async, main_loop)
                              ├─ parse_intent (LLM)
                              ├─ execute_intent (DB)
                              └─ _send_text (lark.im.v1.message.create)
 ```
 
 主线程是 FastAPI 的 asyncio 事件循环。lark 的 WebSocket 客户端 `client.start()` 是**阻塞**的所以放线程里;它收到消息后通过 `run_coroutine_threadsafe` 把工作甩回主循环用 async `parse_intent`,结果回流到线程后调同步的 SDK 发回复。
+
+### 为什么重连不交给 lark 自己做
+
+lark-oapi 1.4.15 的 `ws/client.py` 有几个坑, 叠起来的效果就是"跑久了机器人静默失联,
+日志里 `3001 registered too many conns` 每秒好几条, 只能重启容器":
+
+| 坑 | 后果 |
+|---|---|
+| `start()` 结尾是 `run_until_complete(_select())`, 而 `_select()` 是 `while True: sleep(3600)` | **线程永不退出**, 所以"线程还活着"不代表"连接还活着" |
+| `_try_connect()` 遇到 `ClientException`(连接数超限属于这类) 往上抛, 穿过 `_reconnect()` / `_receive_message_loop()` 的 except 变成没人接的 task 异常 | **内部重连链彻底断掉**, 线程仍 alive → 老 supervisor 走"一切正常"分支, 永不重启 |
+| `_connect()` 里 `await self._lock.acquire()` 之后 `if self._conn is not None: return` 不 release | 之后 `_disconnect()`/`_write_message()` 永久阻塞在 acquire 上 |
+| `loop` 是 import 期绑定的**模块级全局**, 所有 Client 实例共用 | 第二条 WS 线程 `start()` 时该 loop 正被上一条跑着 → `RuntimeError: This event loop is already running` |
+| 老的 `_stop_ws()` setattr 的 `_stop`/`stopped`/`_should_stop` 和 `stop()`/`close()` **lark 一个都没有** | 停不掉旧客户端, 却把 `_ws_thread` 清成 None → supervisor 丢失引用, 再起一条 → 多个 Client 各自重连 → 连接数超限 → 3001 刷屏 |
+| lark 的 logger 名是 **`Lark`**(大写 L) | 老代码静音的是 `lark`/`lark_oapi`, 一个都没命中, 3001 把 logbuffer 打穿, 拖慢每个 API 请求 |
+
+所以现在:
+
+- `auto_reconnect=False` —— 关掉 lark 的内部重连循环
+- 线程里自建 loop 并**显式覆写** `lark_oapi.ws.client.loop`, 重启才可靠
+- 停止 = 先 `_disconnect()`(让飞书侧连接计数回落) + 强行 release 泄漏的锁 +
+  `loop.call_soon_threadsafe(loop.stop)` + `join` —— 线程真的会退出
+- 判死看**连接**: `client._conn` 为空或已关闭, 连续超过 90s 才判死 → 停 → 按退避重启。
+  收到事件的时间只做诊断展示, **不参与判死**(群里长时间没人说话是正常的)
+- 连接数超限走专属长退避 **300s → 600s → 1200s → 1800s**(普通失败仍是 30/60/120/300)
+- 模块级 `threading.Lock` 保证任何时刻最多一条 `feishu-ws` 线程
+- `Lark` logger 挂了按模板限流的 filter, 同类日志 60s 放一条, 其余计数后汇总
 
 ## 故障排查
 
@@ -106,6 +133,8 @@ FastAPI startup
 | `feishu WS crashed` | 多半是 App ID / Secret 不对,或者事件订阅没切到 "长连接" |
 | 在群里 @ 没反应 | 权限里有没有 `im:message.group_at_msg`;事件里有没有 `im.message.receive_v1` |
 | 收到消息但不回 | 看 SDK error 日志;权限里要有 `im:message` 才能 send |
+| 日志刷 `3001 registered too many conns` | 飞书侧连接数顶到上限了。现在会自动走 5~30 分钟长退避慢慢等它回落, **不要手动反复重启容器** —— 每次重启都会再占一条连接, 越重启越好不了。看 `GET /api/diag` 的 `feishu.next_retry_in_s` 等着就行 |
+| 机器人突然不响应了 (以前只能重启容器) | `curl -s localhost:8080/api/diag \| jq .feishu` 看 `connected` / `uptime_s` / `consecutive_failures` / `next_retry_in_s`。判死是 90s 粒度, 正常情况会自愈 |
 
 ## 参考
 

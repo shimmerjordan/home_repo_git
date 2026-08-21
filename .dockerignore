@@ -1,0 +1,21 @@
+# 构建上下文是整个仓库 (build: .), 但镜像只需要 backend/{requirements.txt,app}、
+# frontend 源码和 deploy/。剩下的必须排掉, 有三个具体原因:
+#   1. data/certs/{ca.key,server.key} 是 root 600, 传统 builder (DOCKER_BUILDKIT=0)
+#      打包上下文时读不动, 直接 "error checking context: no permission to read" 构建失败;
+#      顺带也别把私钥和 config.json 里的 API key 发给 docker daemon。
+#   2. frontend/node_modules 86M 每次白传。
+#   3. __pycache__ 的 mtime 一变就让 COPY backend/app 那层缓存失效。
+.git
+.gitignore
+data
+docs
+frontend/node_modules
+frontend/dist
+**/__pycache__
+**/*.pyc
+**/.impeccable
+# 测试/评测台/CI 配置不进镜像 (Dockerfile 只 COPY backend/app), 排掉省得白传上下文。
+# 要跑它们是把源码 bind mount 进容器, 见 docs/voice.md。
+.github
+backend/tests
+backend/eval

@@ -1,0 +1,19 @@
+{
+  "_comment": [
+    "评测台专用的 LLM 参数。存在的理由: cassette 的 key 由 model/thinking/effort/max_tokens",
+    "加上完整 prompt 算出来 —— 这几个值一变, --replay 就找不到录好的响应。",
+    "所以把它们钉在这里, 而不是跟着 data/config.json 飘。",
+    "base_url 和 api_key **故意不写在这**: 录制时从 data/config.json (或 EVAL_LLM_BASE_URL /",
+    "EVAL_LLM_API_KEY) 取, 回放时根本不发请求。这样公开仓库里不会出现私人网关地址和密钥。",
+    "换模型重录: 改 model 后跑一次不带 --replay 的 run_eval, 新 cassette 会自动落盘。"
+  ],
+  "llm": {
+    "api_format": "anthropic",
+    "model": "claude-opus-4-8",
+    "thinking": "",
+    "effort": "",
+    "max_tokens": 4096,
+    "supports_tools": true,
+    "fast_mode": false
+  }
+}

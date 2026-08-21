@@ -1,26 +1,14 @@
 services:
-  backend:
-    build: ./backend
-    container_name: storage-backend
+  # 前后端同一个容器: nginx 反代同容器内的 uvicorn (127.0.0.1:8000), 后端不再对外暴露。
+  app:
+    build: .
+    container_name: storage-app
     restart: unless-stopped
-    volumes:
-      - ./data:/app/data
     environment:
       - DATABASE_URL=sqlite:////app/data/storage.db
       - CONFIG_PATH=/app/data/config.json
       - LOG_DIR=/app/data/logs
       - CORS_ORIGINS=*
-      - TZ=${TZ:-Asia/Shanghai}
-    expose:
-      - "8000"
-
-  frontend:
-    build: ./frontend
-    container_name: storage-frontend
-    restart: unless-stopped
-    depends_on:
-      - backend
-    environment:
       - TZ=${TZ:-Asia/Shanghai}
       # 局域网 IP(可空格/逗号分隔多个), 写进服务器证书 SAN, 让 iPad 用 https://<IP>:8443
       # 装信任本地 CA 后零弹窗。由 start.sh 自动探测传入; 也可手动 export LAN_IP=...
@@ -31,8 +19,9 @@ services:
       # HTTPS 入口: iPad/手机局域网用语音走这里
       - "${APP_PORT:-8443}:443"
     volumes:
-      # 持久化本地 CA + 服务器证书, 重建容器不丢 (CA 换了 iPad 就得重装)
-      - ./data/certs:/etc/nginx/certs
+      # 一个卷装全部持久化数据: storage.db / config.json / logs / certs。
+      # certs 里的本地 CA 换了 iPad 就得重装, 所以别动这个路径。
+      - ./data:/app/data
 
   whisper:
     image: onerahmet/openai-whisper-asr-webservice:latest

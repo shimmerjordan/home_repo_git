@@ -1,0 +1,96 @@
+# 常规检查: 后端测试 + AI 准确度回归 + 前端能不能编出来。
+# 全程不联网调 LLM —— 准确度回归用 backend/eval/cassettes/ 里录好的响应回放,
+# 所以 CI 不需要任何 API key, 也不会因为模型抖动变红。
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_call:      # release.yml 把这个当发布前的闸门复用
+
+jobs:
+  backend:
+    name: 后端测试 + AI 准确度回放
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+          cache: pip
+          cache-dependency-path: backend/requirements.txt
+
+      - name: 装依赖
+        run: pip install -r backend/requirements.txt
+
+      - name: 单元 + 集成测试
+        working-directory: backend/tests
+        env:
+          # 测试自己会建临时 sqlite 和临时 config, 这两个只是兜底,
+          # 免得哪个模块在 import 期就去碰 /app/data。
+          DATABASE_URL: 'sqlite://'
+          CONFIG_PATH: '${{ runner.temp }}/ci-config.json'
+          LOG_DIR: '${{ runner.temp }}/ci-logs'
+        run: python -m unittest discover -s . -v
+
+      - name: AI 准确度回归 (离线回放 cassette)
+        working-directory: backend
+        env:
+          CONFIG_PATH: '${{ runner.temp }}/eval-config.json'
+        run: |
+          # --replay: 只读 eval/cassettes/, 缺 cassette 就报错而不是偷偷去打真 API。
+          # 退出码非 0 表示有 case 不达预期。
+          python -m eval.run_eval --replay
+
+  frontend:
+    name: 前端构建
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+      - run: npm ci
+        working-directory: frontend
+      - run: npm run build
+        working-directory: frontend
+
+  deploy-files:
+    name: compose 文件一致性
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with: { python-version: '3.11' }
+      - run: pip install pyyaml
+      # 两个 compose 描述同一套部署, 只差 build/image 一行。谁改了一边忘另一边,
+      # 用户按 release 页部署出来的就跟仓库里的不是一回事, 且不会报错只会行为怪。
+      - name: docker-compose.yml 与 deploy/compose.release.yml 必须一致
+        run: python deploy/check_compose_parity.py
+      - name: 发布产物能正常生成 (占位符全替换 + compose 合法)
+        run: |
+          set -euo pipefail
+          sed 's|__IMAGE__|ghcr.io/example/app:v0.0.0|g' \
+            deploy/compose.release.yml > /tmp/compose.yml
+          ! grep -q '__IMAGE__' /tmp/compose.yml
+          docker compose -f /tmp/compose.yml config -q
+          echo OK
+
+  image:
+    name: 镜像能构建 (amd64, 不推送)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: docker/setup-buildx-action@v3
+      - name: 构建 (只验证, 不推)
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          push: false
+          platforms: linux/amd64
+          cache-from: type=gha
+          cache-to: type=gha,mode=max

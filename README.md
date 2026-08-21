@@ -5,20 +5,39 @@
 
 # 语音仓储管家 (Voice Storage)
 
+[![CI](https://github.com/shimmerjordan/home_repo_git/actions/workflows/ci.yml/badge.svg)](https://github.com/shimmerjordan/home_repo_git/actions/workflows/ci.yml)
+[![Release](https://img.shields.io/github/v/release/shimmerjordan/home_repo_git?sort=semver)](https://github.com/shimmerjordan/home_repo_git/releases/latest)
+
 [部分功能视频示例](https://www.bilibili.com/video/BV1vZ5a69EvH/?share_source=copy_web)
 
 家庭杂物仓储管理系统,通过**语音 / 钉钉群 / Telegram / 飞书群**查找、存放、取出物品。
-前端跑在 iPad 浏览器,后端用 Docker Compose 部署在 N5105 这类工控 NAS 上,完全本地运行,只把意图解析的少量摘要文字发给可配置的 OpenAI 兼容 LLM。
+前端跑在 iPad 浏览器,服务端用 Docker Compose 部署在 N5105 这类工控 NAS 上 —— **前后端同一个容器** (`storage-app`: nginx + FastAPI, supervisord 带起),完全本地运行,只把意图解析的少量摘要文字发给可配置的 OpenAI 兼容 LLM。
 
 支持**多个"家"**(我家 / 老家 / 父母家),3D 立体可视化所有房间和家具,语音找到东西时自动推进相机 + 高亮目标 + 周围淡出。
 
+## 跑起来
+
+**用发布的镜像(推荐,不编译,一个 compose 文件管到底):**
+
 ```bash
-git clone <repo>
-cd repo_git
-./start.sh
-# 浏览器打开 http://<NAS-IP>:8080 (无证书弹窗) → 设置页配置 LLM API key → 开干
-# 要用浏览器麦克风语音时改走 https://<NAS-IP>:8443 (自签证书, 首次需信任)
+mkdir -p voice-storage && cd voice-storage
+curl -fLO https://github.com/shimmerjordan/home_repo_git/releases/latest/download/compose.yml
+printf 'LAN_IP=%s\n' "$(hostname -I | awk '{print $1}')" > .env   # iPad 走 HTTPS 用语音时要
+docker compose up -d
 ```
+
+**从源码编译:**
+
+```bash
+git clone https://github.com/shimmerjordan/home_repo_git.git
+cd home_repo_git
+./start.sh
+```
+
+打开 `http://<NAS-IP>:8080` → 设置页填 LLM API key → 开干。
+iPad 用语音走 `https://<NAS-IP>:8443`,装一次本地 CA 后零弹窗。
+
+从旧的双容器版迁过来、端口/环境变量、发版流程都在 [`docs/deployment.md`](docs/deployment.md)。
 
 ---
 
@@ -26,7 +45,7 @@ cd repo_git
 
 | 模块 | 说明 |
 |---|---|
-| **[deployment](docs/deployment.md)** | 快速启动 / 端口约定 / 首次配置 / 数据持久化 / 故障排查 |
+| **[deployment](docs/deployment.md)** | 两种部署方式 / 端口约定 / 首次配置 / 数据持久化 / 发版流程 / 故障排查 |
 | **[architecture](docs/architecture.md)** | 运行时拓扑 / 项目结构 / 数据模型 / 启动顺序 / LLM 摘要算法 |
 | **[voice](docs/voice.md)** | 语音状态机 / LLM 配置 / 加速 tips / iOS 注意事项 |
 | **[api](docs/api.md)** | REST API 速查 + OpenAPI 文档入口 |
@@ -57,11 +76,16 @@ cd repo_git
 - **Telegram bot** ([配置](docs/bots/telegram.md))
 - **飞书群机器人** ([配置](docs/bots/feishu.md))
 
+### 落库前人工确认 (默认开启)
+- 会改数据的操作**先出方案,不直接写库**:每条一个候选下拉(含「新建」)+ 数量 + 位置 + 跳过
+- **名字相近时默认建新物品** —— 说「存入洗发水」不会悄悄加到「洗手液」头上
+- 说「新增 X 到 Y」就是全新物品,不做同名合并
+- 「近期取放记录」和「流水」页每条都有 **↩ 回撤**
+
 ### LLM 接入 (完全可配置)
-- OpenAI 兼容协议,任何 `/v1/chat/completions` 的服务都行
-- 内置预设:**OpenAI / 硅基流动 / DeepSeek / Ollama / 智谱 GLM**
-- 极速模式 + 可调 `max_tokens` 优化中文响应延迟
-- 详见 [`docs/voice.md`](docs/voice.md)
+- OpenAI 兼容 + Anthropic `/v1/messages`;预设:OpenAI / 硅基流动 / DeepSeek / Ollama / 智谱 / Claude / cc-trans
+- **`max_tokens` 别调小** —— 512 会截断多物品的 tool 调用,详见 [`docs/voice.md`](docs/voice.md)
+- 准确度评测台 `backend/eval/`:32 条标注语句,分类出准确率,可离线回放
 
 ### 诊断 & 日志
 - 浏览器能力自检(secure context / mediaDevices / SpeechRecognition / AudioContext)
@@ -72,5 +96,5 @@ cd repo_git
 
 ## 演进
 
-最近: 多家分组 + 钉钉 + Telegram + **飞书 Stream Mode** + 漂亮 3D 家具 mesh + URL 路由 + 30s 沉默自动确认 + iPad RMS 修复。
+最近: **落库前逐条确认** + 回撤按钮 + AI 准确度深度优化 (截断检测/分段检索/评测台) + 飞书长连接卡死修复 + **前后端合并单容器** (端口与数据布局不变)。
 完整历史见 [`docs/changelog.md`](docs/changelog.md)。

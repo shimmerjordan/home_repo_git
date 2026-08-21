@@ -29,9 +29,12 @@ class LLMConfig(BaseModel):
     # Some providers (Ollama old versions, certain inference servers) don't support tool calling.
     # When false, we fall back to JSON-mode prompting.
     supports_tools: bool = Field(default=True)
-    # Cap response tokens — a fast lightweight model can answer in <300 tokens easily;
-    # capping shaves latency on slow Chinese inference providers.
-    max_tokens: int = Field(default=512, ge=64, le=8192)
+    # 输出 token 上限。**不要再往 512 那种量级调**: 带思考的模型 (Claude Opus/Sonnet)
+    # 光 thinking 块就吃掉大半预算, 一句 4 个物品的批量操作实测要 490~550 output tokens。
+    # 512 时 stop_reason=max_tokens, tool_use 的 input JSON 断在一半, operations 整个丢空 ——
+    # 这就是"多物品操作经常不符合预期"的头号原因。低于 MIN_SANE_MAX_TOKENS 的旧配置
+    # 会在载入时自动抬到 DEFAULT_MAX_TOKENS (见 ConfigStore._migrate)。
+    max_tokens: int = Field(default=4096, ge=64, le=16384)
     # Fast mode: shorter system prompt + smaller inventory summary. Set true when you've
     # picked a light model (e.g. glm-4-flash, qwen2.5-7b) and want minimum latency.
     fast_mode: bool = Field(default=False)
@@ -43,6 +46,16 @@ class VoiceConfig(BaseModel):
     confirm_before_llm: bool = Field(
         default=True,
         description="发送给 LLM 前先口头确认识别文本是否正确,节省 token",
+    )
+    # 落库前先让人过一遍。AI 的物品匹配会出错 —— 说"存入洗发水"而库里只有"洗手液"时,
+    # 老流程直接给洗手液加库存, 用户看到的只是一句汇总话术。打开这个开关后, 所有会改数据的
+    # 操作 (take_out/put_in/consume/create_item/delete_item) 都只生成"待确认方案",
+    # 每个单品给出候选下拉 + 可自填的新物品名, 由用户点确认才真正执行。
+    # 只读意图 (find/list/assist) 不受影响, 查东西还要点一下确认是折磨。
+    # 群机器人 (飞书/TG/钉钉) 没有界面可点, 不走这条路, 行为不变。
+    confirm_before_apply: bool = Field(
+        default=True,
+        description="改动数据前先在界面上逐条确认 (物品匹配错了可当场改)",
     )
     # TTS — names depend on the browser. Empty = browser default.
     tts_enabled: bool = Field(default=True, description="是否朗读 AI 结果")
@@ -126,26 +139,62 @@ class AppConfig(BaseModel):
     webdav: WebDAVConfig = Field(default_factory=WebDAVConfig)
 
 
+# 低于这个值的 max_tokens 一定会截断带思考模型的多物品输出, 载入时强制抬高。
+MIN_SANE_MAX_TOKENS = 2048
+DEFAULT_MAX_TOKENS = 4096
+
+
 class ConfigStore:
     def __init__(self, path: Path):
         self.path = path
         self._lock = threading.Lock()
         self._config = self._load()
 
+    @staticmethod
+    def _migrate(cfg: AppConfig) -> list[str]:
+        """就地修正明显有害的历史配置值。返回人话描述的改动列表(空 = 没动)。
+
+        存在的理由: 光改 Field 的 default 对**已经存在**的 data/config.json 毫无作用 ——
+        线上那份 max_tokens=512 会一直生效, 等于没修。
+        """
+        notes: list[str] = []
+        if cfg.llm.max_tokens < MIN_SANE_MAX_TOKENS:
+            notes.append(
+                f"llm.max_tokens {cfg.llm.max_tokens} → {DEFAULT_MAX_TOKENS} "
+                f"(过小会截断多物品的 tool 调用, operations 会整个丢空)"
+            )
+            cfg.llm.max_tokens = DEFAULT_MAX_TOKENS
+        return notes
+
     def _load(self) -> AppConfig:
         if self.path.exists():
             try:
                 data = json.loads(self.path.read_text(encoding="utf-8"))
-                return AppConfig(**data)
+                cfg = AppConfig(**data)
+                notes = self._migrate(cfg)
+                if notes:
+                    for n in notes:
+                        print(f"[config] 自动迁移: {n}", flush=True)
+                    self._save(cfg)
+                return cfg
             except Exception:
                 pass
         cfg = AppConfig()
         self._save(cfg)
         return cfg
 
-    def _save(self, cfg: AppConfig) -> None:
-        self.path.parent.mkdir(parents=True, exist_ok=True)
-        self.path.write_text(cfg.model_dump_json(indent=2), encoding="utf-8")
+    def _save(self, cfg: AppConfig) -> bool:
+        """写盘。**失败不抛** —— 这个方法在 import 期就会被调用 (_load 的迁移和
+        首次建档), 让它抛就等于"data 目录只读时后端直接起不来"。写不进去时退回
+        用内存里的配置继续跑, 只是改动不持久化。"""
+        try:
+            self.path.parent.mkdir(parents=True, exist_ok=True)
+            self.path.write_text(cfg.model_dump_json(indent=2), encoding="utf-8")
+            return True
+        except OSError as exc:
+            print(f"[config] 无法写入 {self.path}: {exc} —— 本次改动不会持久化",
+                  flush=True)
+            return False
 
     def get(self) -> AppConfig:
         with self._lock:
@@ -166,7 +215,11 @@ class ConfigStore:
                     current[key].update(value)
                 else:
                     current[key] = value
-            self._config = AppConfig(**current)
+            merged = AppConfig(**current)
+            # UI 也拦一道: 把 max_tokens 调回 512 这种值会立刻让多物品操作重新变成静默丢失,
+            # 所以这里同样抬高。设置页会写明这条下限。
+            self._migrate(merged)
+            self._config = merged
             self._save(self._config)
             return self._config.model_copy(deep=True)
 

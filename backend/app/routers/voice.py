@@ -11,8 +11,8 @@ from .. import models
 from ..config import store
 from ..database import get_db
 from ..llm.client import LLMError
-from ..llm.intent import execute_intent, parse_intent
-from ..schemas import IntentResult, VoiceQuery
+from ..llm.intent import apply_operations, execute_intent, parse_intent
+from ..schemas import IntentApply, IntentResult, VoiceQuery
 from ..services.inventory import location_path
 from ..services.logbuffer import app_log
 
@@ -43,7 +43,15 @@ async def voice_intent(payload: VoiceQuery, db: Session = Depends(get_db)):
         }
         return execute_intent(db, text, parsed, cfg)
 
-    log.info("intent.parse text=%r", text)
+    # plan_only: 只出"待确认方案", 一个字都不落库。网页端在
+    # voice.confirm_before_apply 打开时传 true; 没传就沿用老的"直接执行"行为
+    # (群机器人没有界面可点, 永远走老路)。客户端显式传 false 可以强制关掉。
+    plan_only = ctx.get("plan_only")
+    if plan_only is None:
+        plan_only = False
+    plan_only = bool(plan_only) and cfg.voice.confirm_before_apply
+
+    log.info("intent.parse text=%r plan_only=%s", text, plan_only)
     try:
         out = await parse_intent(text, db, cfg)
     except LLMError as exc:
@@ -52,10 +60,33 @@ async def voice_intent(payload: VoiceQuery, db: Session = Depends(get_db)):
 
     parsed = out["parsed"]
     log.debug("intent.parsed %s", parsed)
-    result = execute_intent(db, text, parsed, cfg)
-    app_log.info("intent.done text=%r intent=%s conf=%.2f executed=%s tx=%s",
-                 text, result.get("intent"), result.get("confidence", 0),
-                 result.get("executed"), result.get("transaction_id"))
+    result = execute_intent(db, text, parsed, cfg, plan_only=plan_only)
+    app_log.info("intent.done text=%r intent=%s stage=%s conf=%.2f executed=%s tx=%s ops=%d",
+                 text, result.get("intent"), result.get("stage"),
+                 result.get("confidence", 0), result.get("executed"),
+                 result.get("transaction_id"), len(result.get("operations") or []))
+    return result
+
+
+@router.post("/apply", response_model=IntentResult)
+def voice_apply(payload: IntentApply, db: Session = Depends(get_db)):
+    """执行用户在方案界面上确认过的操作。单事务, 不再调 LLM。
+
+    这里不重新解析语句 —— 用户已经逐条挑好目标了, 再问一次 AI 只会引入新的猜错机会。
+    """
+    decisions = [d.model_dump() for d in payload.decisions]
+    if not decisions:
+        raise HTTPException(400, "没有要执行的操作")
+    base = {
+        "intent": "batch", "confidence": 1.0, "speech": "",
+        "needs_confirmation": False, "pending_action": None,
+        "candidates": [], "recommendations": [], "executed": False,
+        "transaction_id": None, "operations": [], "stage": "applied",
+        "plan_id": payload.plan_id, "raw": {"decisions": decisions},
+    }
+    result = apply_operations(db, payload.text or "", decisions, base)
+    app_log.info("intent.apply plan=%s ops=%d executed=%s",
+                 payload.plan_id, len(decisions), result.get("executed"))
     return result
 
 

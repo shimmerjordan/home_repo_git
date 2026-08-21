@@ -8,7 +8,9 @@ Pipeline:
 """
 from __future__ import annotations
 
+import logging
 import re
+import uuid
 from datetime import datetime
 from typing import Any
 
@@ -17,8 +19,11 @@ from sqlalchemy.orm import Session
 from .. import models
 from ..config import AppConfig
 from ..services.inventory import location_path, search_items, serialize_transaction
+from ..services.logbuffer import app_log
 from ..services.summary import build_summary
-from .client import LLMClient, LLMError
+
+log = logging.getLogger("storage.intent")
+from .client import LLMClient, LLMError, LLMTruncated
 
 
 SYSTEM_PROMPT = """你是家庭仓储管家的语义解析器, 同时要给出温暖、口语化的中文回答。
@@ -53,21 +58,37 @@ SYSTEM_PROMPT = """你是家庭仓储管家的语义解析器, 同时要给出�
    - 新增成功: "记下啦, 充电宝放在卧室床头柜了"
    - 不确定: "我不太确定, 是想找充电宝吗"
 
-批量操作 (重要):
-- 用户一句话涉及**多个物品**时 (无论查询还是操作), 必须把每个物品的操作都列进 operations 数组, 一条不落, 绝不能只处理第一个
-- operations 里每条包含: intent(find/take_out/put_in/consume/create_item/delete_item) / item_id(库存里有就填) / item_name / location_id / location_name / quantity
-- 例1 "把手表、铅笔、橡皮放进书桌1" -> 三条 put_in; 位置从"位置列表"里找 id 填 location_id, 找不到就填 location_name="书桌1"; 物品不在库存时**仍用 put_in**(后端会自动新建到该位置)
-- 例2 "我消耗了一瓶水和两片药" -> 两条 consume
+批量操作 (最重要, 这里出错代价最大):
+- 用户一句话涉及**多个物品**时 (无论查询还是操作), 必须把每个物品**各自一条**列进 operations 数组,
+  一条不落。绝不能只处理第一个, 也绝不能把多个物品塞进同一条的 item_name 里
+- 先在心里数一遍用户提到了几个物品, operations 的条数必须等于这个数
+- operations 里每条包含: intent / item_id / item_name / location_id / location_name / quantity / force_new
+- **数量各自算**: "两瓶水和三包纸巾" -> 水 quantity=2, 纸巾 quantity=3。没说数量就是 1
+- 例1 "把手表、铅笔、橡皮放进书桌1" -> 三条 put_in; 位置从"位置列表"里找 id 填 location_id, 找不到就填 location_name="书桌1"
+- 例2 "我消耗了一瓶水和两片药" -> 两条 consume (quantity 分别 1 和 2)
 - 例3 "手表和铅笔在哪" -> 两条 find
 - 例4 "拿了卷尺, 顺便把螺丝刀放回工具箱" -> 一条 take_out + 一条 put_in
-- 顶层 intent 填第一个操作的意图, speech 一句话总结全部操作 (如 "好的, 已把手表、铅笔、橡皮放进书桌1")
+- 例5 "我用完了洗手液, 拿了螺丝刀和卷尺, 把两个充电器放回书桌1" -> 四条 (consume/take_out/take_out/put_in)
+- 顶层 intent 填第一个操作的意图, speech 一句话总结全部操作
 - 只有一个物品/操作时 operations 留空, 继续用顶层字段
+
+物品匹配 (第二重要):
+- **不确定就不要猜 item_id**。把 item_id 留空 (null)、把 item_name 填成用户说的原词、
+  把你觉得可能的几个 id 放进 candidates, 并调低 confidence。后端会让用户在界面上挑,
+  你猜错了会把库存加到别人头上, 而留空只是多点一下
+- 只有当库存里那条记录的**名称或别名和用户说的基本一致**时才填 item_id
+- 语义相近但不是同一样东西 (充电宝 vs 充电器 / 洗发水 vs 洗手液 / 螺丝刀 vs 螺丝) 一律**不要**填 item_id
+
+force_new (全新物品, 不要匹配):
+- 用户说"**新增/新建/添加/录入/新买的/记一个新的** X" 时, 说明 X 是全新物品:
+  intent 用 create_item, 并且 **force_new=true**, item_id 必须留空
+- 这种情况下就算库存里有同名的也不要匹配 —— 用户的意思是再建一条新档案
+- 反之 "把X放进Y" / "X放回Y" 是归位/入库, 不是新增: 用 put_in, force_new=false
+- "又买了两瓶水" / "补货" 这类是补库存: 用 put_in, 优先匹配已有档案 (包括"库存为0的旧档案"那一段)
 
 注意:
 - "我刚拿了X"对应 take_out (借出, 待归位); "我用完了X" / "X 喝完了" / "扔了X" 对应 consume (永久减库存, 不待归位)
 - "我把X放在Y了"对应 put_in (归位; 如果有 take_out 待归位的同名物品, 自动抵消)
-- 找不到精确匹配, 请在 candidates 列出最接近的几个 id, 并把 confidence 调低
-- 用户明确说"创建/新增/添加/记录一个新物品"时, 必须使用 create_item, 不要改成 put_in。合并判断由后端负责, 你只需正确识别意图和提取 item_name
 - create_item 必须包含 item_name 和(可选) location_id
 - 如果完全无法理解, intent=unknown, confidence=0
 """
@@ -84,7 +105,7 @@ INTENT_SCHEMA_HINT = """{
   "candidates": [123, 456],       // 备选 item_id, 当不确定时给出
   "operations": [                 // 一句话涉及多个物品时列出全部 (含 find 查询), 单操作留空
     {"intent": "consume|find|take_out|put_in|create_item|delete_item", "item_id": 12, "item_name": "矿泉水",
-     "location_id": null, "location_name": null, "quantity": 1}
+     "location_id": null, "location_name": null, "quantity": 1, "force_new": false}
   ],
   "reasoning": "string (一句解释)"
 }"""
@@ -113,6 +134,11 @@ TOOLS = [
                         "description": "目标位置名称 (位置列表里找不到 id 时填)",
                     },
                     "quantity": {"type": "integer", "default": 1},
+                    "force_new": {
+                        "type": "boolean",
+                        "default": False,
+                        "description": "true = 用户说的是全新物品(新增/新建/添加/录入/新买的), 不要匹配任何已有物品",
+                    },
                     "candidates": {
                         "type": "array",
                         "items": {"type": "integer"},
@@ -136,6 +162,11 @@ TOOLS = [
                                     "description": "目标位置名称 (位置列表里找不到 id 时填)",
                                 },
                                 "quantity": {"type": "integer", "default": 1},
+                                "force_new": {
+                                    "type": "boolean",
+                                    "default": False,
+                                    "description": "true = 全新物品, 不要匹配已有物品",
+                                },
                             },
                             "required": ["intent"],
                         },
@@ -168,34 +199,111 @@ MUTATION_INTENTS = {"take_out", "put_in", "consume", "create_item", "delete_item
 BATCH_INTENTS = MUTATION_INTENTS | {"find"}
 
 
+# "新增/新建/添加..." 这类措辞 = 全新物品, 不要往已有档案上匹配 (用户明确要求)。
+# 只信 prompt 是不够的 —— 模型偶尔会把"新增X到Y"解析成 put_in, 所以后端再兜一道。
+FORCE_NEW_VERBS = re.compile(r"新增|新建|新添|添加|录入|新登记|记一个新|新买的|买了个新")
+# 反例: 这些措辞是补库存/归位, 即使句中出现"买"也**不能**当成全新物品。
+RESTOCK_HINTS = re.compile(r"补货|补充|又买|再买|补上|添满")
+
+
+def _looks_force_new(text: str) -> bool:
+    """整句里是否有"这是个新物品"的明确措辞。"""
+    if not text:
+        return False
+    if RESTOCK_HINTS.search(text):
+        return False
+    return bool(FORCE_NEW_VERBS.search(text))
+
+
+def _coerce_int(val: Any) -> int | None:
+    """LLM 偶尔把 id 给成字符串 "12" 或 "null"。"""
+    if val is None or isinstance(val, bool):
+        return None
+    try:
+        return int(val)
+    except (TypeError, ValueError):
+        return None
+
+
 def _op_from_parsed(parsed: dict[str, Any]) -> dict[str, Any] | None:
     """Extract a single operation dict from a top-level parsed intent (or None)."""
     if parsed.get("intent") not in BATCH_INTENTS:
         return None
     return {
         "intent": parsed["intent"],
-        "item_id": parsed.get("item_id"),
+        "item_id": _coerce_int(parsed.get("item_id")),
         "item_name": parsed.get("item_name"),
-        "location_id": parsed.get("location_id"),
+        "location_id": _coerce_int(parsed.get("location_id")),
         "location_name": parsed.get("location_name"),
-        "quantity": int(parsed.get("quantity") or 1),
+        "quantity": max(1, _coerce_int(parsed.get("quantity")) or 1),
+        "force_new": bool(parsed.get("force_new")),
     }
 
 
-def _normalize_operations(parsed: dict[str, Any]) -> list[dict[str, Any]]:
-    """Coerce parsed['operations'] into a clean list of batch ops."""
+# 少数模型会把 intent 写成同义词, 映射回来比直接丢掉好。
+_INTENT_ALIASES = {
+    "take": "take_out", "takeout": "take_out", "borrow": "take_out", "remove": "take_out",
+    "put": "put_in", "putin": "put_in", "store": "put_in", "add": "put_in", "restock": "put_in",
+    "use": "consume", "used": "consume", "finish": "consume", "discard": "consume",
+    "create": "create_item", "new": "create_item", "new_item": "create_item",
+    "delete": "delete_item", "remove_item": "delete_item",
+    "search": "find", "lookup": "find", "query": "find", "where": "find",
+}
+
+
+def _op_key(op: dict[str, Any]) -> tuple:
+    """去重键。多 tool_call 合并 (见 parse_intent) 会产生完全重复的条目。"""
+    return (
+        op["intent"], op.get("item_id"),
+        (op.get("item_name") or "").strip().lower(),
+        op.get("location_id"), (op.get("location_name") or "").strip().lower(),
+        op["quantity"],
+    )
+
+
+def _normalize_operations(parsed: dict[str, Any], utterance: str = "") -> list[dict[str, Any]]:
+    """Coerce parsed['operations'] into a clean list of batch ops.
+
+    以前这里对任何看不懂的条目直接 `continue` —— 静默丢一条操作, 用户完全无从察觉。
+    现在: 别名映射一次, 丢弃的写进 parsed['_dropped_ops'] 让上层能记日志, 并去重。
+    """
     ops: list[dict[str, Any]] = []
+    dropped: list[Any] = []
+    seen: set[tuple] = set()
+    sentence_force_new = _looks_force_new(utterance)
     for raw in parsed.get("operations") or []:
-        if not isinstance(raw, dict) or raw.get("intent") not in BATCH_INTENTS:
+        if not isinstance(raw, dict):
+            dropped.append(raw)
             continue
-        ops.append({
-            "intent": raw["intent"],
-            "item_id": raw.get("item_id"),
+        intent = str(raw.get("intent") or "").strip()
+        intent = _INTENT_ALIASES.get(intent.lower(), intent)
+        if intent not in BATCH_INTENTS:
+            dropped.append(raw)
+            continue
+        op = {
+            "intent": intent,
+            "item_id": _coerce_int(raw.get("item_id")),
             "item_name": raw.get("item_name"),
-            "location_id": raw.get("location_id"),
+            "location_id": _coerce_int(raw.get("location_id")),
             "location_name": raw.get("location_name"),
-            "quantity": max(1, int(raw.get("quantity") or 1)),
-        })
+            "quantity": max(1, _coerce_int(raw.get("quantity")) or 1),
+            "force_new": bool(raw.get("force_new")),
+        }
+        # create_item 本身就是"建一条新的", 语义上等价于 force_new。
+        if op["intent"] == "create_item":
+            op["force_new"] = True
+        # 后端兜底: 整句有"新增/新建"措辞而模型给成了 put_in, 升级成 create_item。
+        # 只在单条操作时兜底 —— 多条时无法可靠判断"新增"修饰的是哪一个物品, 宁可不动。
+        elif (op["intent"] == "put_in" and sentence_force_new
+                and len(parsed.get("operations") or []) == 1):
+            op["intent"] = "create_item"
+            op["force_new"] = True
+        if _op_key(op) in seen:
+            continue
+        seen.add(_op_key(op))
+        ops.append(op)
+    if dropped:
+        parsed["_dropped_ops"] = dropped
     return ops
 
 
@@ -223,7 +331,34 @@ def _resolve_location(db: Session, ref: dict[str, Any]) -> int | None:
     return fallback
 
 
+# 截断重试的放大倍数与硬上限。一次翻 4 倍足够覆盖"思考块吃掉大半预算"的情况。
+TRUNCATION_RETRY_FACTOR = 4
+TRUNCATION_RETRY_CAP = 16384
+
+
 async def parse_intent(text: str, db: Session, cfg: AppConfig) -> dict[str, Any]:
+    """解析一次意图。遇到输出被 max_tokens 截断时用更大的预算重试一次。
+
+    截断为什么必须重试而不能将就: tool_use 的 input JSON 断在一半时,
+    operations 数组可能整个丢空 —— 用户说了四件事, 后端一件都没收到,
+    却仍然按"成功"往下走。宁可多打一次请求。
+    """
+    try:
+        return await _parse_once(text, db, cfg, max_tokens=None)
+    except LLMTruncated as exc:
+        bigger = min(TRUNCATION_RETRY_CAP,
+                     max(exc.max_tokens, cfg.llm.max_tokens) * TRUNCATION_RETRY_FACTOR)
+        log.warning("意图解析被截断 (max_tokens=%s), 用 %s 重试一次: %s",
+                    exc.max_tokens, bigger, text[:60])
+        app_log.warning("AI 输出被 max_tokens=%s 截断, 已用 %s 重试 —— "
+                        "建议到设置页把 max_tokens 调到 4096 以上",
+                        exc.max_tokens, bigger)
+        return await _parse_once(text, db, cfg, max_tokens=bigger)
+
+
+async def _parse_once(
+    text: str, db: Session, cfg: AppConfig, *, max_tokens: int | None
+) -> dict[str, Any]:
     summary = build_summary(db, text, fast_mode=cfg.llm.fast_mode)
 
     user_msg = (
@@ -244,7 +379,8 @@ async def parse_intent(text: str, db: Session, cfg: AppConfig) -> dict[str, Any]
     client = LLMClient(cfg.llm)
     parsed: dict[str, Any]
     if cfg.llm.supports_tools:
-        result = await client.chat(messages, tools=TOOLS)
+        result = await client.chat(messages, tools=TOOLS,
+                                   force_tool="submit_intent", max_tokens=max_tokens)
         if result["tool_calls"]:
             calls = [tc["arguments"] for tc in result["tool_calls"] if tc.get("arguments")]
             parsed = calls[0]
@@ -267,20 +403,26 @@ async def parse_intent(text: str, db: Session, cfg: AppConfig) -> dict[str, Any]
                     parsed["operations"] = ops
         elif result["content"]:
             # Fallback if model ignored the tool.
-            parsed = await client.chat_json(messages, schema_hint=INTENT_SCHEMA_HINT)
+            parsed = await client.chat_json(messages, schema_hint=INTENT_SCHEMA_HINT,
+                                            max_tokens=max_tokens)
         else:
             raise LLMError("Model returned neither tool call nor content")
     else:
-        parsed = await client.chat_json(messages, schema_hint=INTENT_SCHEMA_HINT)
+        parsed = await client.chat_json(messages, schema_hint=INTENT_SCHEMA_HINT,
+                                        max_tokens=max_tokens)
 
     # Validate & coerce.
     parsed.setdefault("intent", "unknown")
-    parsed["confidence"] = max(0.0, min(1.0, float(parsed.get("confidence", 0.0))))
+    try:
+        parsed["confidence"] = max(0.0, min(1.0, float(parsed.get("confidence", 0.0))))
+    except (TypeError, ValueError):
+        parsed["confidence"] = 0.0
     parsed.setdefault("speech", "")
     parsed.setdefault("quantity", 1)
     parsed.setdefault("candidates", [])
     parsed.setdefault("recommendations", [])
     parsed.setdefault("operations", [])
+    parsed.setdefault("force_new", False)
     return {"parsed": parsed, "summary": summary}
 
 
@@ -400,7 +542,339 @@ def _create_or_merge_item(
     return item, tx, False
 
 
-_OP_VERB = {"find": "查找", "take_out": "取出", "put_in": "存入", "consume": "用完", "create_item": "新增"}
+_OP_VERB = {"find": "查找", "take_out": "取出", "put_in": "存入", "consume": "用完",
+            "create_item": "新增", "delete_item": "删除"}
+
+# ---------------------------------------------------------------------------
+# 待确认方案 (plan) —— 只解析不落库
+#
+# 为什么要有这一层: 老流程是"边解析边落库", 而 put_in/take_out/consume 在 item_id
+# 缺失时会退化成 `candidates_objs[0]` —— 兜底查询用的还是**整句话**。于是
+# "把新买的洗发水放进浴室柜子" 会命中"洗手液"并直接给它加库存, 用户只看到一句
+# 汇总话术, 完全不知道加错了人头。plan 把"AI 认为是谁"变成"AI 建议是谁 + 全部候选",
+# 由用户在界面上逐条确认。模糊命中一律**不预选已有物品**, 默认按新物品处理。
+# ---------------------------------------------------------------------------
+
+# 允许"建一条新物品"的意图。取出/用完一个不存在的东西没有意义。
+ALLOW_NEW_INTENTS = {"put_in", "create_item"}
+# 方案里可选项的 key: "new" = 新建, "skip" = 跳过, "i:<id>" = 已有物品。
+OPT_NEW = "new"
+OPT_SKIP = "skip"
+
+
+def _opt_key(item_id: int) -> str:
+    return f"i:{item_id}"
+
+
+def parse_option_key(key: str) -> tuple[str, int | None]:
+    """把前端回传的 key 解析成 (kind, item_id)。"""
+    key = (key or "").strip()
+    if key == OPT_NEW:
+        return OPT_NEW, None
+    if key == OPT_SKIP:
+        return OPT_SKIP, None
+    if key.startswith("i:"):
+        return "item", _coerce_int(key[2:])
+    return OPT_SKIP, None
+
+
+def _same_name_items(db: Session, name: str) -> list[models.Item]:
+    """名称或别名与 name 完全一致的全部物品 (同名可能分布在多个位置)。"""
+    name_lower = (name or "").strip().lower()
+    if not name_lower:
+        return []
+    out: list[models.Item] = []
+    for it in db.query(models.Item).all():
+        if (it.name or "").lower() == name_lower or name_lower in _alias_set(it.aliases or ""):
+            out.append(it)
+    return out
+
+
+def _option_dict(it: models.Item, kind: str, score: float | None) -> dict[str, Any]:
+    loc = location_path(it.location) if it.location else "未指定位置"
+    return {
+        "key": _opt_key(it.id),
+        "kind": kind,
+        "item_id": it.id,
+        "label": it.name,
+        "sublabel": f"{loc} ×{it.quantity}",
+        "score": score,
+    }
+
+
+def _do_find(db: Session, op: dict[str, Any]) -> dict[str, Any]:
+    """只读查询一条 op。plan 与批量执行共用 —— find 不改数据, 没必要让用户确认。"""
+    item, cands, how = _find_item_for_op(db, op)
+    r: dict[str, Any] = {
+        "intent": "find", "item_id": None, "item_name": op.get("item_name"),
+        "quantity": op["quantity"], "executed": False, "transaction_id": None,
+        "speech": "", "candidates": _cand_dicts(cands), "matched_by": how,
+        "pending": False, "location_path": None, "remaining": None,
+    }
+    if not item:
+        r["speech"] = f"没找到{op.get('item_name') or '该物品'}"
+        return r
+    loc = location_path(item.location) if item.location else "未登记位置"
+    r.update(item_id=item.id, item_name=item.name, executed=True,
+             location_path=location_path(item.location) if item.location else None,
+             remaining=item.quantity)
+    r["speech"] = f"{item.name}在{loc}(×{item.quantity})"
+    return r
+
+
+def _plan_one(db: Session, op: dict[str, Any]) -> dict[str, Any]:
+    """给一条 op 算出候选选项和预选项。不碰数据库写入。"""
+    intent = op["intent"]
+    name = (op.get("item_name") or "").strip()
+    allow_new = intent in ALLOW_NEW_INTENTS
+    force_new = bool(op.get("force_new")) and allow_new
+
+    # LLM 直接点名的那个 (可能既不在 exact 也不在 fuzzy 里)。先查它, 因为下面可能要借它的名字。
+    llm_item = db.query(models.Item).get(op["item_id"]) if op.get("item_id") else None
+
+    # 模型偶尔只给 item_id 不给 item_name。这时没有名字可用来"新建", 只能沿用它点的那条 ——
+    # 不兜住的话会预选 "新建" 但名字是空的, 前端确认按钮永远点不下去。
+    # 必须在算 exact/fuzzy **之前**补上, 否则拿空名字去查, 同名判定必然落空。
+    borrowed_name = False
+    if not name and llm_item is not None:
+        name = llm_item.name or ""
+        borrowed_name = True
+
+    exact_items = _same_name_items(db, name) if name else []
+    exact_ids = {it.id for it in exact_items}
+    fuzzy_items = [it for it in search_items(db, name, limit=5) if it.id not in exact_ids] if name else []
+    if llm_item is not None and llm_item.id not in exact_ids and llm_item not in fuzzy_items:
+        fuzzy_items.insert(0, llm_item)
+
+    options: list[dict[str, Any]] = []
+    new_opt = {
+        "key": OPT_NEW, "kind": "new", "item_id": None,
+        "label": f"新建「{name or '未命名'}」", "sublabel": "", "score": None,
+    }
+    if allow_new and force_new:
+        options.append(new_opt)
+    for it in exact_items:
+        options.append(_option_dict(it, "exact", 1.0))
+    for i, it in enumerate(fuzzy_items):
+        options.append(_option_dict(it, "fuzzy", round(max(0.05, 0.6 - i * 0.1), 2)))
+    if allow_new and not force_new:
+        options.append(new_opt)
+
+    # 预选 + 理由。这里的取舍是本功能的核心: **模糊命中绝不预选已有物品。**
+    if not name:
+        # 既没名字也没 id, 什么都干不了。
+        selected, matched_by = OPT_SKIP, "none"
+        reason = "没识别出物品名"
+    elif borrowed_name and llm_item is not None:
+        # 名字是从 item_id 反查来的 —— 用户根本没说物品名(比如"把它放回书桌1"),
+        # 那就没有"新建"的余地, 直接用模型点的那条。
+        selected, matched_by = _opt_key(llm_item.id), "exact"
+        reason = f"按上下文认成「{name}」"
+    elif force_new:
+        selected, matched_by = OPT_NEW, "created"
+        reason = "说了新增 → 默认建新"
+    elif llm_item is not None and not exact_items and not allow_new:
+        # 只有 id 没同名记录, 且这条不能新建 (取出/用完) —— 就用模型点的那条, 但明说是猜的。
+        selected, matched_by = _opt_key(llm_item.id), "fuzzy"
+        reason = f"库里没有「{name}」, 这是最接近的一条"
+    elif len(exact_items) == 1:
+        selected, matched_by = _opt_key(exact_items[0].id), "exact"
+        reason = "名称一致"
+    elif len(exact_items) > 1:
+        selected, matched_by = _opt_key(exact_items[0].id), "ambiguous"
+        reason = f"{len(exact_items)} 处同名, 请选"
+    elif allow_new:
+        selected, matched_by = OPT_NEW, "created"
+        reason = ("库里没有, 默认建新" if not fuzzy_items
+                  else "库里没有; 下面几个只是名字相近")
+    elif fuzzy_items:
+        selected, matched_by = _opt_key(fuzzy_items[0].id), "fuzzy"
+        reason = "只有名字相近的, 请复核"
+    else:
+        selected, matched_by = OPT_SKIP, "none"
+        reason = f"库里没有「{name or '该物品'}」"
+
+    loc_id = _resolve_location(db, op)
+    loc = db.query(models.Location).get(loc_id) if loc_id else None
+    return {
+        "intent": intent,
+        "item_id": None if selected in (OPT_NEW, OPT_SKIP) else parse_option_key(selected)[1],
+        "item_name": name,
+        "quantity": op["quantity"],
+        "executed": False,
+        "transaction_id": None,
+        "speech": "",
+        "candidates": _cand_dicts(exact_items + fuzzy_items),
+        "matched_by": matched_by,
+        "pending": True,
+        "location_id": loc_id,
+        "location_name": op.get("location_name"),
+        "location_path": location_path(loc) if loc else None,
+        "remaining": None,
+        # 方案专属字段
+        "options": options,
+        "selected": selected,
+        "allow_new": allow_new,
+        "force_new": force_new,
+        "new_name_default": name,
+        "reason": reason,
+    }
+
+
+def plan_operations(
+    db: Session, text: str, ops: list[dict[str, Any]], base: dict[str, Any]
+) -> dict[str, Any]:
+    """把一串 op 变成"待确认方案"。只读, 不落库。"""
+    # find 是只读的, 当场查掉当作信息行展示; 只有会改数据的才进"待确认"。
+    planned = [_do_find(db, op) if op["intent"] == "find" else _plan_one(db, op)
+               for op in ops]
+    base["stage"] = "plan"
+    base["plan_id"] = str(uuid.uuid4())
+    base["operations"] = planned
+    base["needs_confirmation"] = True
+    base["executed"] = False
+    intents = {o["intent"] for o in ops}
+    base["intent"] = ops[0]["intent"] if len(intents) == 1 else "batch"
+    # 方案阶段的候选给前端做 3D 高亮用: 汇总各条的候选。
+    seen: set[int] = set()
+    merged_cands: list[dict[str, Any]] = []
+    for r in planned:
+        for c in r["candidates"]:
+            if c["item_id"] in seen:
+                continue
+            seen.add(c["item_id"])
+            merged_cands.append(c)
+    base["candidates"] = merged_cands
+    todo = [r for r in planned if r["pending"]]
+    found = [r["speech"] for r in planned if not r["pending"] and r["speech"]]
+    if len(todo) > 1:
+        base["speech"] = f"识别到 {len(todo)} 个操作, 请在屏幕上确认后执行"
+    elif len(todo) == 1:
+        one = todo[0]
+        base["speech"] = (f"要{_OP_VERB.get(one['intent'], '执行')}"
+                          f"{one['item_name'] or '这个物品'}×{one['quantity']} 吗? 请确认")
+    else:
+        base["speech"] = "; ".join(found) or "没有需要执行的操作"
+    if found and todo:
+        base["speech"] = "; ".join(found) + " —— " + base["speech"]
+    return base
+
+
+def _create_item_forced(
+    db: Session, name: str, qty: int, loc_id: int | None, note: str = "语音新增",
+) -> tuple[models.Item, models.Transaction]:
+    """建一条全新物品, **不做同名合并**。
+
+    用户说"新增 X 到 Y"就是要一条新档案 —— 哪怕库里已经有同名的。
+    合并需求由方案界面上的候选项承担 (选已有物品即为合并)。
+    """
+    item = models.Item(name=name, location_id=loc_id, quantity=qty)
+    db.add(item)
+    db.flush()
+    tx = models.Transaction(
+        item_id=item.id, action="put_in", quantity=qty,
+        location_id=item.location_id, note=note,
+    )
+    db.add(tx)
+    db.flush()
+    return item, tx
+
+
+def apply_operations(
+    db: Session, text: str, decisions: list[dict[str, Any]], base: dict[str, Any]
+) -> dict[str, Any]:
+    """执行用户确认过的方案。**单事务** —— 要么全成要么全不动。
+
+    decisions 每条: {intent, option_key, new_item_name, location_id, location_name, quantity}
+    option_key: "new" / "skip" / "i:<item_id>"
+    """
+    results: list[dict[str, Any]] = []
+    fragments: list[str] = []
+    mutated = False
+    for d in decisions:
+        intent = d.get("intent") or "put_in"
+        if intent not in MUTATION_INTENTS:
+            continue
+        qty = max(1, _coerce_int(d.get("quantity")) or 1)
+        kind, item_id = parse_option_key(d.get("option_key") or "")
+        loc_id = _resolve_location(db, d)
+        r: dict[str, Any] = {
+            "intent": intent, "item_id": item_id,
+            "item_name": (d.get("new_item_name") or "").strip() or None,
+            "quantity": qty, "executed": False, "transaction_id": None,
+            "speech": "", "candidates": [], "matched_by": "", "pending": False,
+            "location_path": None, "remaining": None,
+        }
+        if kind == OPT_SKIP:
+            r["speech"] = f"已跳过{_OP_VERB.get(intent, intent)}{r['item_name'] or '这一条'}"
+            results.append(r)
+            fragments.append(r["speech"])
+            continue
+
+        if kind == OPT_NEW:
+            name = (d.get("new_item_name") or "").strip()
+            if not name:
+                r["speech"] = "新物品缺少名称, 这条没执行"
+                results.append(r)
+                fragments.append(r["speech"])
+                continue
+            item, tx = _create_item_forced(db, name, qty, loc_id)
+            mutated = True
+            loc_text = location_path(item.location) if item.location else "未指定位置"
+            r.update(item_id=item.id, item_name=item.name, executed=True,
+                     transaction_id=tx.id, matched_by="created")
+            r["speech"] = f"已新增{item.name}×{qty} 到{loc_text}"
+        else:
+            item = db.query(models.Item).get(item_id) if item_id else None
+            if item is None:
+                r["speech"] = "目标物品已不存在, 这条没执行"
+                results.append(r)
+                fragments.append(r["speech"])
+                continue
+            r["item_name"] = item.name
+            r["matched_by"] = "confirmed"
+            if intent == "delete_item":
+                # cascade 会连带删掉该物品的全部历史流水, 且不可恢复。
+                # 界面上已经二次确认过了, 这里如实执行。
+                name = item.name
+                db.delete(item)
+                db.flush()
+                mutated = True
+                r.update(executed=True)
+                r["speech"] = f"已永久删除{name}"
+                results.append(r)
+                fragments.append(r["speech"])
+                continue
+            # create_item 但用户挑了已有物品 => 意思是合并进去, 等价于 put_in。
+            action = "put_in" if intent == "create_item" else intent
+            tx = _apply_stock_op(db, action, item, qty, loc_id, note="语音操作(已确认)")
+            mutated = True
+            r.update(executed=True, transaction_id=tx.id)
+            if action == "put_in":
+                loc_text = location_path(item.location) if item.location else "原位置"
+                r["speech"] = f"已存入{item.name}×{qty}到{loc_text}(共{item.quantity})"
+            else:
+                r["speech"] = f"已{_OP_VERB[action]}{item.name}×{qty}(剩{item.quantity})"
+            r["location_path"] = location_path(item.location) if item.location else None
+            r["remaining"] = item.quantity
+        results.append(r)
+        fragments.append(r["speech"])
+
+    if mutated:
+        db.commit()
+
+    tx_ids = [r["transaction_id"] for r in results if r["transaction_id"]]
+    base["stage"] = "applied"
+    base["operations"] = results
+    base["executed"] = bool(tx_ids)
+    base["transaction_id"] = tx_ids[0] if tx_ids else None
+    base["needs_confirmation"] = False
+    base["confidence"] = 1.0
+    intents = {r["intent"] for r in results}
+    base["intent"] = results[0]["intent"] if len(intents) == 1 and results else "batch"
+    base["speech"] = "; ".join(f for f in fragments if f) or "没有需要执行的操作"
+    return base
+
 
 
 def _execute_batch(
@@ -449,15 +923,8 @@ def _execute_batch(
         }
         item: models.Item | None = None
         if intent == "find":
-            item, cands, how = _find_item_for_op(db, op)
-            r["candidates"] = _cand_dicts(cands)
-            r["matched_by"] = how
-            if not item:
-                r["speech"] = f"没找到{op.get('item_name') or '该物品'}"
-            else:
-                loc = location_path(item.location) if item.location else "未登记位置"
-                r.update(item_id=item.id, item_name=item.name, executed=True)
-                r["speech"] = f"{item.name}在{loc}(×{item.quantity})"
+            r = _do_find(db, op)
+            item = db.query(models.Item).get(r["item_id"]) if r["item_id"] else None
         elif intent == "delete_item":
             # 唯一不立即执行的动作。Item.transactions 是 cascade delete-orphan,
             # 真删会连带抹掉全部历史流水且无法还原, 所以只解析目标, 等前端确认。
@@ -476,8 +943,13 @@ def _execute_batch(
                 r["speech"] = "有一项缺少物品名称"
             else:
                 loc_id = _resolve_location(db, op)
-                item, tx, merged = _create_or_merge_item(
-                    db, name, qty, loc_id, note="语音创建(批量)")
+                if op.get("force_new"):
+                    item, tx = _create_item_forced(
+                        db, name, qty, loc_id, note="语音新增(批量)")
+                    merged = False
+                else:
+                    item, tx, merged = _create_or_merge_item(
+                        db, name, qty, loc_id, note="语音创建(批量)")
                 mutated = True
                 r.update(item_id=item.id, item_name=item.name,
                          executed=True, transaction_id=tx.id)
@@ -586,9 +1058,15 @@ def _candidate_objects(db: Session, ids: list[int], fallback_query: str) -> list
 
 
 def execute_intent(
-    db: Session, text: str, parsed: dict[str, Any], cfg: AppConfig
+    db: Session, text: str, parsed: dict[str, Any], cfg: AppConfig,
+    *, plan_only: bool = False,
 ) -> dict[str, Any]:
-    """Materialize the parsed intent. Returns the IntentResult-shaped dict."""
+    """Materialize the parsed intent. Returns the IntentResult-shaped dict.
+
+    plan_only=True 时**任何会改数据的操作都不执行**, 只返回待确认方案
+    (见 plan_operations)。只读意图 (find/list/assist) 不受影响。
+    网页端在 voice.confirm_before_apply 打开时走这条; 群机器人没有界面可点, 从不走。
+    """
     intent = parsed.get("intent", "unknown")
     confidence = float(parsed.get("confidence", 0.0))
     speech = parsed.get("speech", "")
@@ -614,11 +1092,28 @@ def execute_intent(
         "executed": False,
         "transaction_id": None,
         "operations": [],
+        "stage": "direct",
+        "plan_id": None,
         "raw": parsed,
     }
 
-    # Batch: one utterance containing several operations ("我消耗了A和B").
-    ops = _normalize_operations(parsed)
+    ops = _normalize_operations(parsed, text)
+    if parsed.get("_dropped_ops"):
+        # 以前这里是静默 continue —— 用户说了四件事只做成三件也毫无提示。
+        app_log.warning("AI 返回了 %d 条无法识别的操作, 已忽略: %r",
+                        len(parsed["_dropped_ops"]), parsed["_dropped_ops"][:3])
+    if not ops:
+        # 单条操作时模型走顶层字段而不填 operations —— 合成一条, 让下游只有一套逻辑。
+        single = _op_from_parsed(parsed)
+        if single:
+            ops = [single]
+
+    has_mutation = any(o["intent"] in MUTATION_INTENTS for o in ops)
+    if ops and has_mutation and plan_only:
+        # 待确认方案: 单条和多条走**完全同一条路**。
+        # 老代码在 len(ops)==1 时折回顶层单条路径, 而那条路径的行为和批量路径不一致
+        # (批量里 put_in 找不到物品会自动新建, 单条却会挂到模糊候选上), 是一整类 bug 的来源。
+        return plan_operations(db, text, ops, base)
     if len(ops) >= 2:
         return _execute_batch(db, parsed, ops, cfg, base)
     if len(ops) == 1:
@@ -630,6 +1125,7 @@ def execute_intent(
             if op.get(key) is not None:
                 parsed[key] = op[key]
         parsed["quantity"] = op["quantity"]
+        parsed["force_new"] = bool(op.get("force_new"))
 
     # Resolve a location name ("书桌1") to an id for the single-op path.
     if not parsed.get("location_id") and parsed.get("location_name"):
@@ -717,8 +1213,21 @@ def execute_intent(
                         base["speech"] = f"找到啦,{top.name}在{loc},库存{top.quantity}个"
                     else:
                         base["speech"] = f"你可能想找的是{top.name},放在{loc},库存{top.quantity}个"
+            # find 也补一条 operation。schemas.IntentOperationResult 的约定是
+            # "单条语句也填, 让前端只有一套渲染逻辑" —— 以前只有批量 find 填了,
+            # 单条 find 是空的, 前端那块区域就莫名其妙地空着。
+            base["operations"] = [_single_op(
+                "find", top, 1, executed=True,
+                matched_by="exact" if parsed.get("item_id") else "fuzzy",
+                candidates=base["candidates"] or None, speech=base["speech"],
+            )]
         else:
             base["speech"] = speech or "暂未找到这种东西,可能还没登记进来"
+            base["operations"] = [_single_op(
+                "find", None, 1, matched_by="none", speech=base["speech"],
+            )]
+            base["operations"][0]["item_name"] = (
+                parsed.get("item_name") or "").strip() or None
         return base
 
     if intent == "list":
@@ -733,10 +1242,13 @@ def execute_intent(
         qty = int(parsed.get("quantity") or 1)
         loc_id = parsed.get("location_id")
 
-        # Exact name or alias match → merge into existing item instead of
-        # duplicating. Fuzzy / semantic matches are intentionally ignored here
-        # so the user always gets a fresh record unless the name is identical.
-        item, tx, merged = _create_or_merge_item(db, name, qty, loc_id)
+        # 用户说"新增/新建 X" 时不做任何合并 —— 他要的就是一条新档案。
+        # 其余情况(模型自己选了 create_item)沿用同名合并, 避免重复档案。
+        if parsed.get("force_new"):
+            item, tx = _create_item_forced(db, name, qty, loc_id)
+            merged = False
+        else:
+            item, tx, merged = _create_or_merge_item(db, name, qty, loc_id)
         db.commit()
         db.refresh(tx)
         base["executed"] = True

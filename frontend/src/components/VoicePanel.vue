@@ -6,6 +6,7 @@ import { useAudioMeter } from '../composables/useAudioMeter'
 import Waveform from './Waveform.vue'
 import ItemQuickActions from './ItemQuickActions.vue'
 import OperationResults from './OperationResults.vue'
+import PlanReview from './PlanReview.vue'
 import { isLowEndDevice } from '../composables/sceneLayout'
 
 // three.js (~600 KB) is only pulled in through Scene3D, and here it renders solely once a
@@ -73,6 +74,8 @@ const wakeWordsRef = computed(() => props.settings?.voice?.wake_words || [])
 const useWhisperRef = computed(() => !!props.settings?.voice?.whisper_enabled)
 const confirmBeforeLLM = computed(() => props.settings?.voice?.confirm_before_llm !== false)
 const confidenceThreshold = computed(() => props.settings?.voice?.confidence_threshold ?? 0.5)
+// 打开时: 所有会改数据的操作先出方案, 用户在「最新识别结果」里逐条确认后才落库。
+const confirmBeforeApply = computed(() => props.settings?.voice?.confirm_before_apply !== false)
 
 const voice = useVoice({ wakeWordsRef, useWhisperRef })
 const meter = useAudioMeter({ bars: 36 })
@@ -209,6 +212,40 @@ async function markConsumed(p) {
 function onQuickActionDone() {
   loadRecent(); loadScene(); loadPending(); loadDepleted()
   emit('changed')
+}
+
+// 方案确认执行完: 用返回结果替换掉方案, 卡片自然从"待确认"切到"本次操作"。
+async function onPlanApplied(r) {
+  result.value = r
+  onQuickActionDone()
+  if (r?.speech && !micMuted.value) await voice.speak(r.speech)
+}
+
+function onPlanCancelled() {
+  result.value = null
+  transcript.value = ''
+}
+
+// 一键回撤最近的一条流水。后端已经把"能不能撤"算好放在 t.undoable 里 ——
+// 前端只拿到最近 15 条, 自己判断不了"这是不是该物品的最后一条"。
+const undoingId = ref(0)
+const undoMsg = ref('')
+async function undoTx(t) {
+  if (!t.undoable || undoingId.value) return
+  const verb = txLabel[t.action] || t.action
+  if (!confirm(`回撤「${verb} ${t.item_name} ×${t.quantity}」?\n库存恢复到操作前。`
+    + (t.action === 'put_in' ? '\n若这条是新建产生的, 物品档案一并删除。' : ''))) return
+  undoingId.value = t.id
+  undoMsg.value = ''
+  try {
+    const r = await api.undoTx(t.id)
+    undoMsg.value = r?.message || '已回撤'
+    onQuickActionDone()
+  } catch (e) {
+    undoMsg.value = String(e.message || e).replace(/^\d+\s+\w+:\s*/, '')
+  } finally {
+    undoingId.value = 0
+  }
 }
 
 function timeAgo(iso) {
@@ -437,7 +474,9 @@ async function runIntent() {
   phase.value = 'processing'
   abortRequested.value = false
   try {
-    const intent = await api.voiceIntent(transcript.value)
+    const intent = confirmBeforeApply.value
+      ? await api.voicePlan(transcript.value)
+      : await api.voiceIntent(transcript.value)
     if (abortRequested.value) { phase.value = 'idle'; return }
     result.value = intent
     history.value.unshift({
@@ -449,6 +488,18 @@ async function runIntent() {
       confidence: intent.confidence,
     })
     history.value = history.value.slice(0, 12)
+
+    // 待确认方案: 一个字都还没落库, 由 PlanReview 卡片接手。
+    // 这里**不再**做口头"确定/取消" —— 一句话里有五个操作时口头确认是不可用的,
+    // 而屏幕上逐条挑选才是这个功能的意义所在。只播报一句提示。
+    if (intent.stage === 'plan') {
+      if (intent.speech && !micMuted.value && !abortRequested.value) {
+        await voice.speak(intent.speech)
+      }
+      // find 是只读的, 方案里已经执行了, 刷一下面板让位置/数量同步。
+      loadScene()
+      return
+    }
 
     // Low confidence: ask the user to confirm the proposed action by voice.
     if (intent.confidence < confidenceThreshold.value && intent.pending_action) {
@@ -776,7 +827,7 @@ const inConfirm = computed(() => phase.value === 'confirm-text' || phase.value =
                  :active-home-id="activeHomeId"
                  :height="'clamp(420px, 63vh, 780px)'"
                  @update:low-quality="lowQuality = $event" />
-        <div class="text-xs text-slate-400">语音找到物品时这里会自动推进镜头并高亮目标(其余区域半透淡出)。</div>
+        <div class="text-xs text-slate-400">找到物品时自动推进镜头并高亮。</div>
       </div>
 
       <div class="card p-4 space-y-3 lg:col-span-1">
@@ -797,13 +848,20 @@ const inConfirm = computed(() => phase.value === 'confirm-text' || phase.value =
                    :style="{ width: (result.confidence * 100) + '%' }"></div>
             </div>
             <span class="text-xs font-mono">{{ (result.confidence * 100).toFixed(0) }}%</span>
-            <span v-if="result.executed" class="tag bg-emerald-100 text-emerald-700">已执行</span>
+            <span v-if="result.stage === 'plan'" class="tag bg-amber-100 text-amber-900">待确认</span>
+            <span v-else-if="result.executed" class="tag bg-emerald-100 text-emerald-700">已执行</span>
           </div>
           <div class="text-base text-slate-800 bg-slate-50 rounded-lg p-3">💬 {{ result.speech }}</div>
 
-          <!-- 逐条列出这次到底动了哪些物品, 并允许单条撤销/改判。
-               模糊匹配(打"猜的"角标)最容易出错, 就靠这里纠正。 -->
-          <OperationResults :operations="result.operations || []" @changed="onQuickActionDone" />
+          <!-- stage=plan: 还没落库, 逐条确认 (物品匹配错了在这里改, 含"自己填新名字")。
+               否则: 逐条列出这次到底动了哪些物品, 并允许单条撤销/改判。 -->
+          <PlanReview v-if="result.stage === 'plan'"
+                      :operations="result.operations || []"
+                      :locations="sceneLocations"
+                      :plan-id="result.plan_id || ''"
+                      :text="transcript"
+                      @applied="onPlanApplied" @cancelled="onPlanCancelled" />
+          <OperationResults v-else :operations="result.operations || []" @changed="onQuickActionDone" />
 
           <!-- Needs-based recommendations: shows purpose alongside each item, with a
                "看 3D" affordance to scroll the highlight into view. -->
@@ -867,8 +925,7 @@ const inConfirm = computed(() => phase.value === 'confirm-text' || phase.value =
         <button class="text-xs text-slate-500 hover:text-slate-800" @click="loadDepleted">↻</button>
       </div>
       <div class="text-xs text-slate-600 mb-2">
-        这些物品库存已归零, 搜索和 3D 视图都不会再显示。
-        如果还会买就点 <b>补货</b>;以后不要了就点 <b>永久删除</b>(操作会写入审计日志)。
+        库存归零, 搜索和 3D 都不再显示。还会买点 <b>补货</b>,不要了点 <b>永久删除</b>。
       </div>
       <ul class="divide-y divide-rose-200">
         <li v-for="it in depletedItems" :key="it.id" class="py-2 flex items-center gap-2 text-sm flex-wrap">
@@ -894,7 +951,7 @@ const inConfirm = computed(() => phase.value === 'confirm-text' || phase.value =
         <button class="text-xs text-slate-500 hover:text-slate-800" @click="loadPending">↻</button>
       </div>
       <div class="text-xs text-slate-600 mb-2">
-        以下物品已借出但未记录归位。如果其实已经用完/扔了, 点"已用完";如果放回去了, 点"已归位"。
+        已借出未归位。放回去了点"已归位",用完/扔了点"已用完"。
       </div>
       <ul class="divide-y divide-amber-200">
         <li v-for="p in pendingReturns" :key="p.item_id" class="py-2 flex items-center gap-2 text-sm flex-wrap">
@@ -913,7 +970,10 @@ const inConfirm = computed(() => phase.value === 'confirm-text' || phase.value =
     <div class="card p-4">
       <div class="flex items-center justify-between mb-2">
         <div class="font-semibold">近期取放记录</div>
-        <button class="text-xs text-slate-400 hover:text-slate-700" @click="loadRecent">↻ 刷新</button>
+        <div class="flex items-center gap-2">
+          <span v-if="undoMsg" class="text-xs text-emerald-700">{{ undoMsg }}</span>
+          <button class="text-xs text-slate-400 hover:text-slate-700" @click="loadRecent">↻ 刷新</button>
+        </div>
       </div>
       <div v-if="!recentTx.length" class="text-sm text-slate-400 py-4 text-center">暂无</div>
       <ul v-else class="divide-y divide-slate-100">
@@ -925,6 +985,15 @@ const inConfirm = computed(() => phase.value === 'confirm-text' || phase.value =
           <span class="font-mono text-slate-500">×{{ t.quantity }}</span>
           <span class="text-slate-500 truncate flex-1">{{ t.location_path || '' }}</span>
           <span class="text-xs text-slate-400">{{ fmtFull(t.created_at) }}</span>
+          <!-- 回撤: 只有该物品的最后一条流水撤得回去 (服务端算的 t.undoable),
+               撤不了的按钮置灰并把原因写进 title, 而不是干脆藏起来 —— 藏起来用户
+               只会以为"这行没有回撤功能"。 -->
+          <button class="btn btn-secondary btn-touch text-xs shrink-0"
+                  :disabled="!t.undoable || undoingId === t.id"
+                  :title="t.undoable ? '撤销这条, 库存恢复到操作前' : (t.undo_note || '无法回撤')"
+                  @click="undoTx(t)">
+            {{ undoingId === t.id ? '…' : '↩ 回撤' }}
+          </button>
           <ItemQuickActions v-if="t.item_id" :item-id="t.item_id" :locations="sceneLocations"
                             @done="onQuickActionDone" />
         </li>

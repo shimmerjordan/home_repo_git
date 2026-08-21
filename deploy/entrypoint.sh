@@ -1,7 +1,10 @@
 #!/bin/sh
+# 容器 CMD。证书必须在 nginx 启动前就位, 所以不做成 supervisord 的 program ——
+# 这里先同步跑完签发, 最后 exec 交棒给 supervisord (它再拉起 backend + nginx)。
 set -e
 
-CERT_DIR=/etc/nginx/certs
+# 证书跟 db/config 一起放在同一个挂载卷 (宿主 ./data) 里, 只挂一次。
+CERT_DIR=/app/data/certs
 WEBROOT=/usr/share/nginx/html
 mkdir -p "$CERT_DIR"
 
@@ -75,4 +78,4 @@ rm -f "$SAN_CNF" "$CERT_DIR/server.csr"
 # 把 CA 证书放到 web 根目录, 供设备下载安装: http://<ip>:8080/ca.crt
 cp "$CA_CRT" "$WEBROOT/ca.crt"
 
-exec nginx -g "daemon off;"
+exec /usr/bin/supervisord -c /etc/supervisor/conf.d/supervisord.conf

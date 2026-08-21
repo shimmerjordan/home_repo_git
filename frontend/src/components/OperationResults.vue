@@ -95,7 +95,7 @@ function applyRedirect(idx) {
 
 function confirmDelete(idx) {
   const op = props.operations[idx]
-  if (!confirm(`确认永久删除「${op.item_name}」?该物品的全部历史流水会一并消失,不可恢复。`)) return
+  if (!confirm(`永久删除「${op.item_name}」?历史流水一并消失, 不可恢复。`)) return
   run(idx, async () => {
     await api.deleteItem(op.item_id)
     return { message: `已永久删除「${op.item_name}」` }
@@ -103,7 +103,7 @@ function confirmDelete(idx) {
 }
 
 function dismiss(idx) {
-  done.value = { ...done.value, [idx]: '已取消,未执行删除' }
+  done.value = { ...done.value, [idx]: '已取消' }
 }
 </script>
 
@@ -148,7 +148,7 @@ function dismiss(idx) {
 
       <!-- 改判面板: 默认收起, 批量五条时不至于把卡片撑爆 -->
       <div v-if="openIdx === idx" class="mt-2 space-y-1.5 rounded-md bg-white/70 p-2">
-        <div class="text-slate-500">其实是哪个?</div>
+        <div class="text-slate-500">改到</div>
         <label v-for="c in op.candidates" :key="c.item_id"
                class="flex min-h-[44px] items-center gap-2 rounded px-1 py-1 hover:bg-slate-50">
           <input type="radio" class="h-4 w-4 shrink-0" :value="c.item_id" v-model="choice" />
@@ -159,16 +159,16 @@ function dismiss(idx) {
 
         <label v-if="canCreateNew" class="flex min-h-[44px] items-center gap-2 px-1">
           <input type="radio" class="h-4 w-4 shrink-0" value="NEW" v-model="choice" />
-          <span>都不是,存入新物品:</span>
+          <span>新物品:</span>
           <input v-model="newName" class="input flex-1 py-0.5 text-xs"
                  :disabled="choice !== 'NEW'" placeholder="新物品名称" />
         </label>
 
         <div class="flex flex-wrap justify-end gap-1 pt-1">
           <button class="btn btn-secondary btn-touch text-xs" :disabled="busy" @click="openIdx = -1">取消</button>
-          <button class="btn btn-secondary btn-touch text-xs" :disabled="busy" @click="undo(idx)">仅撤销,不重做</button>
+          <button class="btn btn-secondary btn-touch text-xs" :disabled="busy" @click="undo(idx)">仅撤销</button>
           <button class="btn btn-primary btn-touch text-xs" :disabled="busy || !dirty"
-                  @click="applyRedirect(idx)">撤销并改执行</button>
+                  @click="applyRedirect(idx)">撤销并改</button>
         </div>
       </div>
 

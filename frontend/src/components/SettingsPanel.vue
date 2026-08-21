@@ -99,7 +99,7 @@ async function save() {
       effort: cfg.value.llm.effort || '',
       timeout: parseInt(cfg.value.llm.timeout, 10),
       supports_tools: !!cfg.value.llm.supports_tools,
-      max_tokens: parseInt(cfg.value.llm.max_tokens, 10) || 512,
+      max_tokens: parseInt(cfg.value.llm.max_tokens, 10) || 4096,
       fast_mode: !!cfg.value.llm.fast_mode,
     }
     if (apiKeyInput.value) llm.api_key = apiKeyInput.value
@@ -107,6 +107,7 @@ async function save() {
       wake_words: (cfg.value.voice.wake_words || []).map((s) => s.trim()).filter(Boolean),
       confidence_threshold: parseFloat(cfg.value.voice.confidence_threshold),
       confirm_before_llm: !!cfg.value.voice.confirm_before_llm,
+      confirm_before_apply: !!cfg.value.voice.confirm_before_apply,
       tts_enabled: !!cfg.value.voice.tts_enabled,
       tts_voice: cfg.value.voice.tts_voice || '',
       tts_lang: cfg.value.voice.tts_lang || 'zh-CN',
@@ -241,8 +242,10 @@ const isSecure = computed(() => typeof window !== 'undefined' && window.isSecure
       <div class="grid grid-cols-2 gap-2 border-t pt-3">
         <div>
           <label class="label">Max tokens (响应上限)</label>
-          <input v-model.number="cfg.llm.max_tokens" type="number" min="64" max="8192" class="input" />
-          <div class="text-xs text-slate-500 mt-1">越小越快, 中文 256~512 一般够用.</div>
+          <input v-model.number="cfg.llm.max_tokens" type="number" min="2048" max="16384" step="512" class="input" />
+          <div class="text-xs text-slate-500 mt-1">
+            <b>别低于 2048</b>(低了会被自动抬到 4096)。太小会截断输出, 多物品操作会整批丢失。
+          </div>
         </div>
         <div class="flex items-end">
           <label class="flex items-center gap-2 text-sm">
@@ -278,6 +281,17 @@ const isSecure = computed(() => typeof window !== 'undefined' && window.isSecure
           发送给 AI 前先口头确认识别文本
         </label>
         <div class="text-xs text-slate-500 mt-1">开启后:每条指令在调 AI API 前会播报"你说的是…确认吗",省 token。关闭后直接发送。</div>
+      </div>
+      <div class="border-t pt-3">
+        <label class="flex items-center gap-2 text-sm">
+          <input type="checkbox" v-model="cfg.voice.confirm_before_apply" />
+          改动数据前在界面上逐条确认 <span class="tag bg-emerald-100 text-emerald-700">推荐</span>
+        </label>
+        <div class="text-xs text-slate-500 mt-1">
+          AI 只出方案, 每个物品一个候选下拉(含"新建"), 确认后才写库。
+          名字相近时默认建<b>新物品</b>, 不会悄悄加到别人头上。
+          <br>查找/推荐不受影响;群机器人没界面可点, 始终直接执行。
+        </div>
       </div>
       <div class="border-t pt-3 space-y-2">
         <div class="flex items-center justify-between">
