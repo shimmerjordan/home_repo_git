@@ -452,41 +452,58 @@ def recent_transactions(
 def pending_returns(db: Session = Depends(get_db)):
     """List items currently checked out and awaiting return (借出未归位).
 
-    Definition: per-item, sum(take_out qty) - sum(put_in qty) - sum(consume qty)
-    > 0. We compute this by walking ALL transactions in chronological order and
-    keeping a running balance; the per-item residual is the pending-return qty.
-    For each item we also surface the LAST take_out so the UI can show how long
-    it's been out.
+    Definition: per-item, running balance of take_out − put_in − consume, clamped
+    at 0 (put_in of fresh stock is not a "return"), walked in chronological
+    order. Only items with at least one take_out can be pending, so we restrict
+    the walk to those; Item/Location rows are prefetched in two IN-queries.
     """
-    pending: dict[int, dict] = {}
+    taken_ids = [
+        r[0] for r in db.query(models.Transaction.item_id)
+        .filter(models.Transaction.action == "take_out").distinct().all()
+    ]
+    if not taken_ids:
+        return []
     rows = (
-        db.query(models.Transaction)
+        db.query(models.Transaction.item_id, models.Transaction.action,
+                 models.Transaction.quantity, models.Transaction.created_at,
+                 models.Transaction.location_id)
+        .filter(models.Transaction.item_id.in_(taken_ids),
+                models.Transaction.action.in_(("take_out", "put_in", "consume")))
         .order_by(models.Transaction.created_at.asc())
         .all()
     )
-    for tx in rows:
-        slot = pending.setdefault(tx.item_id, {"qty": 0, "last_take": None, "last_take_loc": None})
-        if tx.action == "take_out":
-            slot["qty"] += tx.quantity
-            slot["last_take"] = tx.created_at
-            slot["last_take_loc"] = tx.location_id
-        elif tx.action in ("put_in", "consume"):
-            slot["qty"] = max(0, slot["qty"] - tx.quantity)
+    pending: dict[int, dict] = {}
+    for item_id, action, quantity, created_at, location_id in rows:
+        slot = pending.setdefault(item_id, {"qty": 0, "last_take": None, "last_take_loc": None})
+        if action == "take_out":
+            slot["qty"] += quantity
+            slot["last_take"] = created_at
+            slot["last_take_loc"] = location_id
+        else:  # put_in / consume
+            slot["qty"] = max(0, slot["qty"] - quantity)
             if slot["qty"] == 0:
                 slot["last_take"] = None
                 slot["last_take_loc"] = None
-        # adjust: ignored — it's a manual recount, not borrow/return
+        # adjust: excluded by the filter — it's a manual recount, not borrow/return
+
+    live = {iid: s for iid, s in pending.items() if s["qty"] > 0}
+    if not live:
+        return []
+    items_by_id = {
+        it.id: it for it in db.query(models.Item).filter(models.Item.id.in_(list(live))).all()
+    }
+    loc_ids = {s["last_take_loc"] for s in live.values() if s["last_take_loc"]}
+    locs_by_id = {
+        l.id: l for l in db.query(models.Location).filter(models.Location.id.in_(list(loc_ids))).all()
+    } if loc_ids else {}
+
     out = []
-    for item_id, slot in pending.items():
-        if slot["qty"] <= 0:
-            continue
-        item = db.query(models.Item).get(item_id)
+    for item_id, slot in live.items():
+        item = items_by_id.get(item_id)
         if not item:
             continue
         # location to RETURN to (where it was when taken out).
-        ret_loc = None
-        if slot["last_take_loc"]:
-            ret_loc = db.query(models.Location).get(slot["last_take_loc"])
+        ret_loc = locs_by_id.get(slot["last_take_loc"]) if slot["last_take_loc"] else None
         out.append({
             "item_id": item.id,
             "item_name": item.name,

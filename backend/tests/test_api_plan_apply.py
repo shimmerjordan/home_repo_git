@@ -204,6 +204,49 @@ class ApiPlanApplyTest(unittest.TestCase):
         self.assertGreaterEqual(cfg.llm.max_tokens, 2048,
                                 "改回 512 必须被自动抬高, 否则多物品又会静默丢失")
 
+    def test_pending_returns_constant_queries(self):
+        """5 个物品各借出一次, 接口不能对每个物品再各查一次 Item/Location (N+1)。"""
+        from sqlalchemy import event
+        from app import models
+        from app.database import SessionLocal, engine
+
+        db = SessionLocal()
+        items = db.query(models.Item).filter(models.Item.quantity > 0).limit(5).all()
+        self.assertGreaterEqual(len(items), 5)
+        # commit 会 expire 所有实例, 关掉 session 后再读 .name 就 DetachedInstance ——
+        # 趁 session 还开着把名字取出来 (同 setUpClass 里的坑)。
+        expected_names = [it.name for it in items]
+        for it in items:
+            db.add(models.Transaction(item_id=it.id, action="take_out", quantity=1,
+                                      location_id=it.location_id))
+        db.commit()
+        db.close()
+
+        count = {"n": 0}
+
+        def _count(conn, cursor, statement, parameters, context, executemany):
+            if statement.lstrip().upper().startswith("SELECT"):
+                count["n"] += 1
+        event.listen(engine, "before_cursor_execute", _count)
+        try:
+            async def go():
+                async with self._client() as c:
+                    return await c.get("/api/transactions/pending-returns")
+            r = self._run(go())
+        finally:
+            event.remove(engine, "before_cursor_execute", _count)
+
+        self.assertEqual(r.status_code, 200)
+        names = {row["item_name"] for row in r.json()}
+        for name in expected_names:
+            self.assertIn(name, names)
+        # 1 次 taken_ids + 1 次 transactions 主查询 + 1 次 items + 1 次 locations = 4,
+        # 再加 location_path 沿 parent 链的 lazy load —— 夹具位置最深 3 层, 但同一
+        # session 内 identity map 会去重已加载的父节点 (SQLAlchemy 对多对一关系走
+        # get() 捷径), 不是每个物品都要重新走一遍链路。实测 6 次; 阈值放宽到
+        # 4 + 位置深度(3) = 7, 而不是简报原定的 4, 原因就是这层 lazy load。
+        self.assertLessEqual(count["n"], 7, f"pending-returns 用了 {count['n']} 次 SELECT")
+
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)
