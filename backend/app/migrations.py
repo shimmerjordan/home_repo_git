@@ -39,6 +39,18 @@ def ensure_columns(engine: Engine) -> None:
                          {"u": str(_uuid.uuid4()), "i": lid})
 
 
+def ensure_indexes(engine: Engine) -> None:
+    """老库补索引。models.py 上 index=True 只对新建表生效, 已有的 storage.db 得靠这里。
+    transactions 按 item_id / location_id 过滤的接口 (流水筛选、pending-returns) 之前走全表。"""
+    stmts = [
+        "CREATE INDEX IF NOT EXISTS ix_transactions_item_id ON transactions (item_id)",
+        "CREATE INDEX IF NOT EXISTS ix_transactions_location_id ON transactions (location_id)",
+    ]
+    with engine.begin() as conn:
+        for s in stmts:
+            conn.execute(_sql_text(s))
+
+
 def migrate_to_home(engine: Engine) -> None:
     """One-shot data migration: legacy DBs predate the "家" (home) concept. If we
     detect ANY top-level locations and there is no home yet, synthesise "我家"
@@ -91,4 +103,5 @@ def migrate_to_home(engine: Engine) -> None:
 def run_all(engine: Engine) -> None:
     """补齐表结构并执行所有向后兼容迁移。启动与恢复共用。"""
     ensure_columns(engine)
+    ensure_indexes(engine)
     migrate_to_home(engine)

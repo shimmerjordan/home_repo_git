@@ -70,10 +70,10 @@ class Transaction(Base):
     __tablename__ = "transactions"
 
     id = Column(Integer, primary_key=True)
-    item_id = Column(Integer, ForeignKey("items.id"), nullable=False)
+    item_id = Column(Integer, ForeignKey("items.id"), nullable=False, index=True)
     action = Column(String(20), nullable=False)  # take_out / put_in / adjust
     quantity = Column(Integer, default=1)
-    location_id = Column(Integer, ForeignKey("locations.id"), nullable=True)
+    location_id = Column(Integer, ForeignKey("locations.id"), nullable=True, index=True)
     note = Column(Text, default="")
     created_at = Column(DateTime, default=datetime.now, index=True)
 
