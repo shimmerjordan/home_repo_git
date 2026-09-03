@@ -12,6 +12,7 @@ import unittest
 
 from _fixtures import item_by, make_session, seed
 
+from app import models
 from app.config import AppConfig
 from app.llm import intent as I
 from app.services.inventory import annotate_undoable, serialize_transaction
@@ -387,6 +388,40 @@ class SegmentTest(unittest.TestCase):
         """"和" 出现在"和的/和了"里不该切。"""
         segs = split_segments("充电宝在哪")
         self.assertEqual(segs, ["充电宝在哪"])
+
+
+class LookupCacheTest(unittest.TestCase):
+    """_find_exact_item 走 per-session 缓存, 但新建物品 flush 之后必须立刻能被找到 ——
+    apply 一批里第二条 "新建 X" 得合并到第一条刚建的 X 上, 这是现有行为。"""
+
+    def test_cache_invalidated_after_flush(self):
+        from app.llm import intent as I
+        db = make_session()
+        seed(db)
+        self.assertIsNone(I._find_exact_item(db, "新物品Z"))
+        db.add(models.Item(name="新物品Z", quantity=1))
+        db.flush()
+        found = I._find_exact_item(db, "新物品Z")
+        self.assertIsNotNone(found)
+        self.assertEqual(found.name, "新物品Z")
+
+    def test_cache_hit_avoids_requery(self):
+        from sqlalchemy import event
+        from app.llm import intent as I
+        db = make_session()
+        seed(db)
+        I._find_exact_item(db, "充电宝")          # 预热
+        n = {"c": 0}
+        def _count(conn, cursor, statement, parameters, context, executemany):
+            if "FROM items" in statement:
+                n["c"] += 1
+        event.listen(db.get_bind(), "before_cursor_execute", _count)
+        try:
+            I._find_exact_item(db, "充电器")
+            I._same_name_items(db, "电池")
+        finally:
+            event.remove(db.get_bind(), "before_cursor_execute", _count)
+        self.assertEqual(n["c"], 0)
 
 
 if __name__ == "__main__":

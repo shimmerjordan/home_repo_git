@@ -307,11 +307,48 @@ def _normalize_operations(parsed: dict[str, Any], utterance: str = "") -> list[d
     return ops
 
 
+# ---- per-session lookup cache -------------------------------------------------
+# plan / apply 一批 5 个物品会把 Location.all() / Item.all() 各查 5~10 遍。这里按 session
+# 缓存整表, 任何 flush / rollback 立刻清空 —— 语义与"每次现查"完全一致 (session 是
+# autoflush=False, 查询本来就只看得到已 flush 的数据)。
+from sqlalchemy import event as _sa_event
+from sqlalchemy.orm import Session as _SaSession
+
+_CACHE_KEY = "_intent_cache"
+
+
+def _cache(db: Session) -> dict:
+    return db.info.setdefault(_CACHE_KEY, {})
+
+
+def _clear_cache(session, *_args) -> None:
+    session.info.pop(_CACHE_KEY, None)
+
+
+_sa_event.listen(_SaSession, "after_flush", _clear_cache)
+_sa_event.listen(_SaSession, "after_rollback", _clear_cache)
+_sa_event.listen(_SaSession, "after_commit", _clear_cache)
+
+
+def _all_locations(db: Session) -> list[models.Location]:
+    c = _cache(db)
+    if "locations" not in c:
+        c["locations"] = db.query(models.Location).all()
+    return c["locations"]
+
+
+def _all_items(db: Session) -> list[models.Item]:
+    c = _cache(db)
+    if "items" not in c:
+        c["items"] = db.query(models.Item).all()
+    return c["items"]
+
+
 def _resolve_location(db: Session, ref: dict[str, Any]) -> int | None:
     """Resolve location_id / location_name to a real Location id (or None).
     Exact name match wins; falls back to substring match on name or full path."""
     if ref.get("location_id"):
-        loc = db.query(models.Location).get(ref["location_id"])
+        loc = db.get(models.Location, ref["location_id"])
         if loc:
             return loc.id
     name = (ref.get("location_name") or "").strip()
@@ -319,7 +356,7 @@ def _resolve_location(db: Session, ref: dict[str, Any]) -> int | None:
         return None
     name_lower = name.lower()
     fallback: int | None = None
-    for loc in db.query(models.Location).all():
+    for loc in _all_locations(db):
         ln = (loc.name or "").lower()
         if ln == name_lower:
             return loc.id
@@ -435,7 +472,7 @@ def _alias_set(aliases_str: str) -> set[str]:
 def _find_exact_item(db: Session, name: str) -> models.Item | None:
     """Exact name/alias match (case-insensitive). Fuzzy matches intentionally ignored."""
     name_lower = name.lower()
-    for candidate in db.query(models.Item).all():
+    for candidate in _all_items(db):
         if (candidate.name or "").lower() == name_lower:
             return candidate
         if name_lower in _alias_set(candidate.aliases or ""):
@@ -466,7 +503,7 @@ def _find_item_for_op(
     用户说"存入充电宝", 库里只有"充电器", 以前会直接给充电器加库存且不告诉任何人。
     """
     if op.get("item_id"):
-        item = db.query(models.Item).get(op["item_id"])
+        item = db.get(models.Item, op["item_id"])
         if item:
             return item, [item], "exact"
     name = (op.get("item_name") or "").strip()
@@ -584,7 +621,7 @@ def _same_name_items(db: Session, name: str) -> list[models.Item]:
     if not name_lower:
         return []
     out: list[models.Item] = []
-    for it in db.query(models.Item).all():
+    for it in _all_items(db):
         if (it.name or "").lower() == name_lower or name_lower in _alias_set(it.aliases or ""):
             out.append(it)
     return out
@@ -630,7 +667,7 @@ def _plan_one(db: Session, op: dict[str, Any]) -> dict[str, Any]:
     force_new = bool(op.get("force_new")) and allow_new
 
     # LLM 直接点名的那个 (可能既不在 exact 也不在 fuzzy 里)。先查它, 因为下面可能要借它的名字。
-    llm_item = db.query(models.Item).get(op["item_id"]) if op.get("item_id") else None
+    llm_item = db.get(models.Item, op["item_id"]) if op.get("item_id") else None
 
     # 模型偶尔只给 item_id 不给 item_name。这时没有名字可用来"新建", 只能沿用它点的那条 ——
     # 不兜住的话会预选 "新建" 但名字是空的, 前端确认按钮永远点不下去。
@@ -695,7 +732,7 @@ def _plan_one(db: Session, op: dict[str, Any]) -> dict[str, Any]:
         reason = f"库里没有「{name or '该物品'}」"
 
     loc_id = _resolve_location(db, op)
-    loc = db.query(models.Location).get(loc_id) if loc_id else None
+    loc = db.get(models.Location, loc_id) if loc_id else None
     return {
         "intent": intent,
         "item_id": None if selected in (OPT_NEW, OPT_SKIP) else parse_option_key(selected)[1],
@@ -825,7 +862,7 @@ def apply_operations(
                      transaction_id=tx.id, matched_by="created")
             r["speech"] = f"已新增{item.name}×{qty} 到{loc_text}"
         else:
-            item = db.query(models.Item).get(item_id) if item_id else None
+            item = db.get(models.Item, item_id) if item_id else None
             if item is None:
                 r["speech"] = "目标物品已不存在, 这条没执行"
                 results.append(r)
@@ -894,7 +931,7 @@ def _execute_batch(
             for o in ops:
                 name = o.get("item_name")
                 if not name and o.get("item_id"):
-                    it = db.query(models.Item).get(o["item_id"])
+                    it = db.get(models.Item, o["item_id"])
                     name = it.name if it else None
                 descs.append(f"{_OP_VERB[o['intent']]}{name or '物品'}×{o['quantity']}")
             base["speech"] = f"我不太确定, 要执行这{len(ops)}个操作吗: " + ", ".join(descs)
@@ -924,7 +961,7 @@ def _execute_batch(
         item: models.Item | None = None
         if intent == "find":
             r = _do_find(db, op)
-            item = db.query(models.Item).get(r["item_id"]) if r["item_id"] else None
+            item = db.get(models.Item, r["item_id"]) if r["item_id"] else None
         elif intent == "delete_item":
             # 唯一不立即执行的动作。Item.transactions 是 cascade delete-orphan,
             # 真删会连带抹掉全部历史流水且无法还原, 所以只解析目标, 等前端确认。
@@ -1270,7 +1307,7 @@ def execute_intent(
         item_id = parsed.get("item_id")
         if not item_id and candidates_objs:
             item_id = candidates_objs[0].id
-        item = db.query(models.Item).get(item_id) if item_id else None
+        item = db.get(models.Item, item_id) if item_id else None
         if not item:
             base["intent"] = "unknown"
             base["speech"] = speech or "没找到要删除的物品"
@@ -1292,7 +1329,7 @@ def execute_intent(
             base["intent"] = "unknown"
             base["speech"] = speech or "没找到这个物品,要不要先创建一个"
             return base
-        item: models.Item | None = db.query(models.Item).get(item_id)
+        item: models.Item | None = db.get(models.Item, item_id)
         if not item:
             base["intent"] = "unknown"
             base["speech"] = "物品不存在了"
