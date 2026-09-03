@@ -504,6 +504,7 @@ def _restore_database(snapshot: bytes) -> None:
 _task: asyncio.Task | None = None
 _wake: asyncio.Event | None = None
 _last_run_at: datetime | None = None
+_loop_iterations = 0
 
 
 def _due(cfg: WebDAVConfig, now: datetime) -> bool:
@@ -533,19 +534,25 @@ def _safe_run() -> None:
 
 
 async def _scheduler_loop() -> None:
+    global _loop_iterations
     app_log.info("backup scheduler started")
     while True:
+        _loop_iterations += 1
         try:
             cfg = store.get().webdav
-            if cfg.enabled and cfg.schedule != "manual" and _due(cfg, datetime.now()):
+            active = bool(cfg.enabled and cfg.schedule != "manual")
+            if active and _due(cfg, datetime.now()):
                 # webdav4 是同步阻塞 IO, 丢到线程池避免卡事件循环。
                 await asyncio.get_event_loop().run_in_executor(None, _safe_run)
-            try:
-                await asyncio.wait_for(_wake.wait(), timeout=60)
-            except asyncio.TimeoutError:
-                pass
-            if _wake:
-                _wake.clear()
+            if active:
+                try:
+                    await asyncio.wait_for(_wake.wait(), timeout=60)
+                except asyncio.TimeoutError:
+                    pass
+            else:
+                # 关闭 / 手动模式: 无 timeout 挂起, 由 reload() 唤醒
+                await _wake.wait()
+            _wake.clear()
         except asyncio.CancelledError:
             break
         except Exception as exc:

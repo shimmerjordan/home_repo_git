@@ -97,6 +97,8 @@ _api_client: Any = None
 _main_loop: asyncio.AbstractEventLoop | None = None
 _running_app_id: str = ""   # the app_id the current WS connection was opened with
 _running_app_secret: str = ""
+_reload_event: asyncio.Event | None = None
+_loop_iterations = 0
 _last_thread_start: float = 0.0   # monotonic seconds; gates the reconnect backoff
 _consecutive_failures: int = 0    # bumps on每次启动, reset on long-lived connection
 _limit_hit: bool = False          # 上一次失败是 "连接数超限" → 走长退避
@@ -705,14 +707,34 @@ async def _supervise_once() -> None:
         _unhealthy_since = None
 
 
+def _is_idle() -> bool:
+    """关闭且 WS 已完全停掉 —— 这时轮询没有任何事可做。"""
+    try:
+        fs = store.get().feishu
+        want = bool(fs.enabled and fs.app_id and fs.app_secret)
+    except Exception:
+        want = False
+    return (not want) and _ws_thread is None and _ws_client is None
+
+
 async def _supervisor() -> None:
-    """只剩循环 + sleep, 真正的判断都在 _supervise_once 里。"""
+    """只剩循环 + 等待, 真正的判断都在 _supervise_once 里。
+    开启态每 POLL_INTERVAL_S 巡检一次; 关闭态无 timeout 挂起, 由 reload() 唤醒。"""
+    global _loop_iterations
     while True:
+        _loop_iterations += 1
         try:
             await _supervise_once()
         except Exception as exc:
             log.exception("feishu supervisor: %s", exc)
-        await asyncio.sleep(POLL_INTERVAL_S)
+        try:
+            if _is_idle():
+                await _reload_event.wait()
+            else:
+                await asyncio.wait_for(_reload_event.wait(), timeout=POLL_INTERVAL_S)
+        except asyncio.TimeoutError:
+            pass
+        _reload_event.clear()
 
 
 # ---- Public API ------------------------------------------------------------
@@ -748,9 +770,13 @@ def health() -> dict:
 
 def start() -> None:
     """Called once at FastAPI startup."""
-    global _supervisor_task, _main_loop
+    global _supervisor_task, _main_loop, _reload_event
     _main_loop = asyncio.get_event_loop()
     if _supervisor_task is None or _supervisor_task.done():
+        # 每次真正起新任务都建新 Event —— 若沿用旧对象, 它可能绑在上一个
+        # (已关闭的) event loop 上, 下次 wait() 会抛 "attached to a different loop"
+        # (测试里每个用例都是独立的 asyncio.run(), 生产里 start() 通常只调一次)。
+        _reload_event = asyncio.Event()
         _supervisor_task = asyncio.create_task(_supervisor(), name="feishu-supervisor")
         app_log.info("feishu supervisor started")
 
@@ -762,6 +788,11 @@ def reload() -> None:
     _consecutive_failures = 0
     _last_thread_start = 0.0
     _limit_hit = False
+    if _reload_event is not None:
+        try:
+            _reload_event.set()
+        except RuntimeError:
+            pass
 
 
 def stop() -> None:

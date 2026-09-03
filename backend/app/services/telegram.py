@@ -29,6 +29,7 @@ log = logging.getLogger("storage.telegram")
 _task: asyncio.Task | None = None
 _reload_event: asyncio.Event | None = None
 _last_offset: int = 0
+_loop_iterations = 0
 
 
 def _api_url(token: str, method: str) -> str:
@@ -138,17 +139,16 @@ async def _handle_update(update: dict[str, Any], cfg) -> None:
 
 async def _polling_loop() -> None:
     """Main worker. Restartable via `reload()`."""
-    global _last_offset
+    global _last_offset, _loop_iterations
     while True:
+        _loop_iterations += 1
         cfg = store.get()
         tg_cfg = cfg.telegram
         if not tg_cfg.enabled or not tg_cfg.bot_token:
-            # Sleep with cancellation via reload event so save-to-enable wakes us up.
-            try:
-                await asyncio.wait_for(_reload_event.wait(), timeout=10)
-                _reload_event.clear()
-            except asyncio.TimeoutError:
-                pass
+            # 关闭态: 无 timeout 挂起, 只有 settings PATCH → reload() 才唤醒。
+            # 以前是 wait_for(..., 10) 每 10s 空醒一次, 在 NAS 上是纯功耗底噪。
+            await _reload_event.wait()
+            _reload_event.clear()
             continue
         try:
             async with httpx.AsyncClient(timeout=35) as client:
@@ -185,9 +185,11 @@ async def _polling_loop() -> None:
 def start() -> None:
     """Called once at FastAPI startup. Safe to call again — re-uses existing task."""
     global _task, _reload_event
-    if _reload_event is None:
-        _reload_event = asyncio.Event()
     if _task is None or _task.done():
+        # 每次真正起新任务都建新 Event —— 若沿用旧对象, 它可能绑在上一个
+        # (已关闭的) event loop 上, 下次 wait() 会抛 "attached to a different loop"
+        # (测试里每个用例都是独立的 asyncio.run(), 生产里 start() 通常只调一次)。
+        _reload_event = asyncio.Event()
         _task = asyncio.create_task(_polling_loop(), name="telegram-poller")
         app_log.info("telegram poller started")
 
