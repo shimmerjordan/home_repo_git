@@ -20,26 +20,33 @@ const importMsg = ref('')
 const fileInput = ref(null)
 
 const store = useInventoryStore()
-async function load() {
+// force=true: 跳过 store 的 fresh 缓存, 强制真正发请求。本组件自己改完数据后
+// (quickTx/remove/saveItem/onFilePicked) 必须立刻拿到最新数据, 不能等
+// refreshKey 那一轮 —— 那一轮触发在 invalidate() 之后, 时间上晚一步。
+async function load(force = false) {
   // Items tab is the canonical management view — show depleted (quantity=0)
   // rows too so users can edit/restore them here. Search and voice paths
   // exclude depleted by default.
   if (q.value) {
+    // 搜索分支的 items 本来就是每次都真发请求的服务端搜索, 天然新鲜;
+    // 只有 locations 走 store, 需要把 force 透传下去。
     const [is_, locs] = await Promise.all([
       api.listItems({ q: q.value, limit: 1000, include_depleted: true }),
-      store.loadLocations(),
+      store.loadLocations(force),
     ])
     items.value = is_
     locations.value = locs
   } else {
-    const [locs, all] = await store.loadAll()
+    const [locs, all] = await store.loadAll(force)
     items.value = all
     locations.value = locs
   }
 }
 
 onMounted(load)
-watch(() => props.refreshKey, load)
+// 注意: 不能直接把 load 当 watch 回调传 —— Vue 会把 (newRefreshKey, old, onCleanup)
+// 当成实参传给它, newRefreshKey 会被当成 force 参数 (非 0 值全部是 truthy)。
+watch(() => props.refreshKey, () => load())
 let debounce
 watch(q, () => {
   clearTimeout(debounce)
@@ -96,14 +103,14 @@ async function quickTx(item, action) {
   const qty = parseInt(prompt(`${action === 'take_out' ? '取出' : '存入'} ${item.name} 的数量`, '1'), 10)
   if (!qty || qty < 1) return
   await api.recordTx(item.id, { item_id: item.id, action, quantity: qty, location_id: item.location_id })
-  await load()
+  await load(true)
   emit('changed')
 }
 
 async function remove(item) {
   if (!confirm(`确认删除 "${item.name}" ?`)) return
   await api.deleteItem(item.id)
-  await load()
+  await load(true)
   emit('changed')
 }
 
@@ -112,7 +119,7 @@ async function saveItem(payload, id) {
   else await api.createItem(payload)
   editing.value = null
   showNew.value = false
-  await load()
+  await load(true)
   emit('changed')
 }
 
@@ -131,7 +138,7 @@ async function onFilePicked(ev) {
   try {
     const r = await api.importItems(file, importMode.value)
     importMsg.value = `✅ 导入完成: 新增 ${r.created},更新 ${r.updated} (模式: ${r.mode})`
-    await load()
+    await load(true)
     emit('changed')
   } catch (e) {
     importMsg.value = '❌ ' + (e.message || e)

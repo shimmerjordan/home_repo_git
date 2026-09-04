@@ -17,13 +17,18 @@ const editing = ref(null)              // currently editing location, drives the
 const editForm = ref(null)             // editable copy
 
 const store = useInventoryStore()
-async function load() {
-  const [locs, all] = await store.loadAll()
+// force=true: 跳过 store 的 fresh 缓存强制真拉一次。本组件改完位置后
+// (createFolder/saveEdit/deleteEdit) 要立刻看到新数据, 不能等 refreshKey
+// 那一轮 (那一轮触发在 invalidate() 之后, 时间上晚一步)。
+async function load(force = false) {
+  const [locs, all] = await store.loadAll(force)
   locations.value = locs
   items.value = store.activeItems.value     // 服务端默认过滤 quantity=0, 这里等价
 }
 onMounted(load)
-watch(() => props.refreshKey, load)
+// 不能直接把 load 传给 watch —— 回调会收到 (newRefreshKey, old, onCleanup),
+// newRefreshKey 会被当成 force 实参。
+watch(() => props.refreshKey, () => load())
 
 const byId = computed(() => {
   const m = new Map()
@@ -116,7 +121,7 @@ async function createFolder() {
   if (!name?.trim()) return
   const kind = cwdId.value === null ? 'room' : 'box'
   await api.createLocation({ name: name.trim(), kind, parent_id: cwdId.value })
-  await load(); emit('changed')
+  await load(true); emit('changed')
 }
 
 // All possible parent targets for the editing node, excluding self/descendants.
@@ -218,7 +223,7 @@ async function saveEdit() {
   }
   if (Object.keys(patch).length === 0) { closeEdit(); return }
   await api.updateLocation(editing.value.id, patch)
-  await load(); emit('changed')
+  await load(true); emit('changed')
   closeEdit()
 }
 
@@ -232,7 +237,7 @@ async function deleteEdit() {
     (cnt > 0 ? `内部 ${cnt} 件物品的位置将变为 "未指定"` : '')
   if (!confirm(msg)) return
   await api.deleteLocation(node.id)
-  await load(); emit('changed')
+  await load(true); emit('changed')
   closeEdit()
 }
 

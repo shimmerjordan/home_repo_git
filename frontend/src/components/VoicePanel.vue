@@ -127,12 +127,15 @@ const micMuted = ref(false)
 const resultSeq = ref(0)
 
 const store = useInventoryStore()
-async function loadScene() {
+// force=true: 跳过 store 的 fresh 缓存强制真拉一次。onQuickActionDone 自己
+// 触发的变更后要立刻看到新场景, 不能等 refreshKey 那一轮 (那一轮触发在
+// invalidate() 之后, 时间上晚一步)。
+async function loadScene(force = false) {
   // Storage events don't fire in the same tab — re-read the active home from
   // localStorage on every refresh so changes made in BuildingPanel show up here.
   activeHomeId.value = loadActiveHome()
   try {
-    const [locs] = await store.loadAll()
+    const [locs] = await store.loadAll(force)
     sceneLocations.value = locs
     sceneItems.value = store.activeItems.value
   } catch {}
@@ -211,8 +214,10 @@ async function markConsumed(p) {
 }
 
 // 快捷操作成功后统一刷新: 流水、3D 场景、待归位、待补充四个列表都可能受影响。
+// loadScene 必须传 force —— 这里在 emit('changed') (进而 invalidate) 之前发生,
+// store 还没标脏, 不 force 就会先渲染一帧变更前的旧场景。
 function onQuickActionDone() {
-  loadRecent(); loadScene(); loadPending(); loadDepleted()
+  loadRecent(); loadScene(true); loadPending(); loadDepleted()
   emit('changed')
 }
 

@@ -109,7 +109,7 @@ async function createHome() {
     kind: 'create',
     payload: { name: name.trim(), kind: 'home', parent_id: null, geometry: { x: offset, z: 0, w: 0, h: 0, d: 0, color: '#0ea5e9' } },
   })
-  await load()
+  await load(true)
   const newHome = created?.id
     ? locations.value.find((l) => l.id === created.id)
     : locations.value.find((l) => l.kind === 'home' && l.name === name.trim())
@@ -123,7 +123,7 @@ async function createHome() {
       for (const r of orphans) {
         await applyEdit({ kind: 'update', id: r.id, patch: { parent_id: newHome.id }, before: history.snapshot(r) })
       }
-      await load()
+      await load(true)
     }
   }
 }
@@ -137,23 +137,28 @@ async function renameActiveHome() {
 }
 
 const store = useInventoryStore()
-async function load() {
-  const [locs, its] = await store.loadAll()
+// force=true: 跳过 store 的 fresh 缓存强制真拉一次。applyEdit/doUndo 自己改完
+// 数据后要立刻看到新数据, 不能等 refreshKey 那一轮 (那一轮触发在
+// invalidate() 之后, 时间上晚一步)。
+async function load(force = false) {
+  const [locs, its] = await store.loadAll(force)
   locations.value = locs.slice()            // 本地可编辑副本: applyEdit / history 直接改这个数组
   items.value = store.activeItems.value
 }
 onMounted(load)
-watch(() => props.refreshKey, load)
+// 不能直接把 load 传给 watch —— 回调会收到 (newRefreshKey, old, onCleanup),
+// newRefreshKey 会被当成 force 实参。
+watch(() => props.refreshKey, () => load())
 
 async function applyEdit(action) {
   const r = await history.applyEdit(action)
-  await load()
+  await load(true)
   emit('changed')
   return r
 }
 async function doUndo() {
   await history.undo()
-  await load()
+  await load(true)
   emit('changed')
 }
 
