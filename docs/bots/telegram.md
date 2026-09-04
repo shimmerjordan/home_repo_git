@@ -7,7 +7,9 @@
 ## 原理
 
 后端启动一个常驻 asyncio 任务,长轮询 `api.telegram.org/bot<token>/getUpdates?timeout=25`。
-NAS 主动出站 HTTPS,Telegram 服务器无需访问 NAS。
+NAS 主动出站 HTTPS,Telegram 服务器无需访问 NAS。**关闭机器人时这个任务不会退出,但也
+不会空转** —— 它挂在 `asyncio.Event` 上零唤醒,不再周期性醒来检查配置,只有设置页保存
+(PATCH `/api/settings`)时才被唤醒一次。
 
 代码: [`backend/app/services/telegram.py`](../../backend/app/services/telegram.py)
 
@@ -47,7 +49,8 @@ Telegram 在国内无法直连。两种思路:
   HTTPS_PROXY=http://127.0.0.1:7890
   HTTP_PROXY=http://127.0.0.1:7890
   ```
-  在 `docker-compose.yml` 的 backend service 加 `environment:` 即可。
+  在 `docker-compose.yml` 的 `app` service(`container_name: storage-app`,前后端合一之后
+  服务名不再是 `backend`)加 `environment:` 即可。
 - **服务部署在境外 VPS**,通过 frp/wireguard 把数据库挂载到本地 NAS
 
 国内不愿翻墙的用户:用 [飞书](feishu.md) 替代,体验类似,完全免穿透。

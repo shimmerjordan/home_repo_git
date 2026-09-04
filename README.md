@@ -17,8 +17,6 @@
 
 ## 跑起来
 
-**用发布的镜像(推荐,不编译,一个 compose 文件管到底):**
-
 ```bash
 mkdir -p voice-storage && cd voice-storage
 curl -fLO https://github.com/shimmerjordan/home_repo_git/releases/latest/download/compose.yml
@@ -26,18 +24,10 @@ printf 'LAN_IP=%s\n' "$(hostname -I | awk '{print $1}')" > .env   # iPad 走 HTT
 docker compose up -d
 ```
 
-**从源码编译:**
-
-```bash
-git clone https://github.com/shimmerjordan/home_repo_git.git
-cd home_repo_git
-./start.sh
-```
-
 打开 `http://<NAS-IP>:8080` → 设置页填 LLM API key → 开干。
 iPad 用语音走 `https://<NAS-IP>:8443`,装一次本地 CA 后零弹窗。
 
-从旧的双容器版迁过来、端口/环境变量、发版流程都在 [`docs/deployment.md`](docs/deployment.md)。
+从源码编译、旧双容器版迁移、端口/环境变量、发版流程都在 [`docs/deployment.md`](docs/deployment.md)。
 
 ---
 
@@ -45,56 +35,24 @@ iPad 用语音走 `https://<NAS-IP>:8443`,装一次本地 CA 后零弹窗。
 
 | 模块 | 说明 |
 |---|---|
-| **[deployment](docs/deployment.md)** | 两种部署方式 / 端口约定 / 首次配置 / 数据持久化 / 发版流程 / 故障排查 |
+| **[deployment](docs/deployment.md)** | 两种部署方式 / 端口约定 / 双容器迁移 / 首次配置 / 数据持久化 / 发版流程 / 故障排查 |
 | **[architecture](docs/architecture.md)** | 运行时拓扑 / 项目结构 / 数据模型 / 启动顺序 / LLM 摘要算法 |
 | **[voice](docs/voice.md)** | 语音状态机 / LLM 配置 / 加速 tips / iOS 注意事项 |
 | **[api](docs/api.md)** | REST API 速查 + OpenAPI 文档入口 |
 | **[backup](docs/backup.md)** | WebDAV 备份 / 选择性 + GFS 分层保留 / AES 加密 / 恢复 |
 | **[bots/](docs/bots/README.md)** | 群机器人接入总览 + 对比表 |
-| ├─ [钉钉](docs/bots/dingtalk.md) | inbound webhook + 加签 (需公网) |
-| ├─ [Telegram](docs/bots/telegram.md) | 长轮询 (无公网, 国内需翻墙) |
-| └─ [飞书](docs/bots/feishu.md) | Stream Mode WebSocket (**国内 + 无公网,推荐**) |
-| **[changelog](docs/changelog.md)** | 版本演进 |
+| **[CHANGELOG](CHANGELOG.md)** | 版本演进 |
 
 ---
 
 ## 功能一览
 
-### 仓储核心
-- **物品**:名称 / 别名 / 分类 / 标签 / 数量 / 单价 / 备注 / 位置
-- **位置**:无限层级文件夹 — 家 → 房间 → 容器 → 抽屉/层 → ...
-- **多个家**:顶层 "家" 分组 ("我家" / "老家" / "父母家"),3D 页可切换
-- **流水 + 审计日志**:每次取出/存入/盘点都记;每个字段的修改 git-blame 风格可查
-- **CSV 导入导出**:路径 `家/房间/箱子/上层` 自动按层级建缺失节点;**老 CSV (无家前缀) 向后兼容**
-- **WebDAV 备份**:全量数据备份到坚果云/Nextcloud/群晖等;选择性组件 + GFS 日/周/月分层保留 + 定时 + AES-256 加密 + 一键恢复 ([配置](docs/backup.md))
+- **仓储核心**:物品(名称/别名/分类/标签/数量/单价/位置)+ 无限层级位置 + 多个"家" + 流水与审计日志 + CSV 导入导出(老 CSV 向后兼容)
+- **多渠道交互**:iPad 语音(唤醒词 + 双层确认 + TTS)、3D 立体可视化、2D 平面图编辑器、钉钉/Telegram/飞书群机器人
+- **落库前人工确认**(默认开启):会改数据的操作先出方案候选,不直接写库;名字相近默认建新物品,不悄悄合并;流水页支持 ↩ 回撤
+- **WebDAV 备份**:选择性组件 + GFS 日/周/月分层保留 + AES-256 加密,坚果云/Nextcloud/群晖等均可([配置](docs/backup.md))
+- **LLM 接入**(完全可配置):OpenAI 兼容 + Anthropic `/v1/messages`,预设 OpenAI/硅基流动/DeepSeek/Ollama/智谱/Claude/cc-trans。
+  `max_tokens` 别调太小,详见 [`docs/voice.md`](docs/voice.md)
+- **诊断 & 日志**:浏览器能力自检、后端状态卡片、前后端合并日志(3s 刷新,来源/级别/关键字过滤)
 
-### 多渠道交互
-- **iPad 语音**:大圆按钮 + 唤醒词 + 双层确认 + 30s 沉默自动确认 + TTS 朗读
-- **3D 立体可视化**:Three.js 渲染所有房间和家具(床/沙发/椅/桌/冰箱/马桶/电视/盆栽... 都不是单立方体),物品在容器里的实际位置高亮
-- **2D 平面图编辑器**:SVG 拖拽家具,锁定模式,多边形房间,自动贴边吸附
-- **钉钉群 @机器人** ([配置](docs/bots/dingtalk.md))
-- **Telegram bot** ([配置](docs/bots/telegram.md))
-- **飞书群机器人** ([配置](docs/bots/feishu.md))
-
-### 落库前人工确认 (默认开启)
-- 会改数据的操作**先出方案,不直接写库**:每条一个候选下拉(含「新建」)+ 数量 + 位置 + 跳过
-- **名字相近时默认建新物品** —— 说「存入洗发水」不会悄悄加到「洗手液」头上
-- 说「新增 X 到 Y」就是全新物品,不做同名合并
-- 「近期取放记录」和「流水」页每条都有 **↩ 回撤**
-
-### LLM 接入 (完全可配置)
-- OpenAI 兼容 + Anthropic `/v1/messages`;预设:OpenAI / 硅基流动 / DeepSeek / Ollama / 智谱 / Claude / cc-trans
-- **`max_tokens` 别调小** —— 512 会截断多物品的 tool 调用,详见 [`docs/voice.md`](docs/voice.md)
-- 准确度评测台 `backend/eval/`:32 条标注语句,分类出准确率,可离线回放
-
-### 诊断 & 日志
-- 浏览器能力自检(secure context / mediaDevices / SpeechRecognition / AudioContext)
-- 后端状态卡片 + 5 个自检按钮
-- 前后端日志合并视图,3s 刷新,支持来源 + 级别 + 关键字过滤
-
----
-
-## 演进
-
-最近: **落库前逐条确认** + 回撤按钮 + AI 准确度深度优化 (截断检测/分段检索/评测台) + 飞书长连接卡死修复 + **前后端合并单容器** (端口与数据布局不变)。
-完整历史见 [`docs/changelog.md`](docs/changelog.md)。
+完整版本历史见 [`CHANGELOG.md`](CHANGELOG.md)。

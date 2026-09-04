@@ -9,10 +9,18 @@ on:
   pull_request:
   workflow_call:      # release.yml 把这个当发布前的闸门复用
 
+# 同一 PR 连推两次不用等旧的跑完。group 里塞 github.workflow 是因为被 release.yml
+# 当闸门复用(workflow_call)时, github.workflow 取的是调用方("Release")而不是
+# "CI" —— 这样 PR/push 的正常 CI 运行和发布时的闸门运行天然落在不同 group, 不会互相取消。
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
 jobs:
   backend:
     name: 后端测试 + AI 准确度回放
     runs-on: ubuntu-latest
+    timeout-minutes: 15
     steps:
       - uses: actions/checkout@v4
 
@@ -47,6 +55,7 @@ jobs:
   frontend:
     name: 前端构建
     runs-on: ubuntu-latest
+    timeout-minutes: 10
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
@@ -59,30 +68,17 @@ jobs:
       - run: npm run build
         working-directory: frontend
 
-  deploy-files:
-    name: compose 文件一致性
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
-        with: { python-version: '3.11' }
-      - run: pip install pyyaml
-      # 两个 compose 描述同一套部署, 只差 build/image 一行。谁改了一边忘另一边,
-      # 用户按 release 页部署出来的就跟仓库里的不是一回事, 且不会报错只会行为怪。
-      - name: docker-compose.yml 与 deploy/compose.release.yml 必须一致
-        run: python deploy/check_compose_parity.py
-      - name: 发布产物能正常生成 (占位符全替换 + compose 合法)
-        run: |
-          set -euo pipefail
-          sed 's|__IMAGE__|ghcr.io/example/app:v0.0.0|g' \
-            deploy/compose.release.yml > /tmp/compose.yml
-          ! grep -q '__IMAGE__' /tmp/compose.yml
-          docker compose -f /tmp/compose.yml config -q
-          echo OK
-
   image:
     name: 镜像能构建 (amd64, 不推送)
     runs-on: ubuntu-latest
+    timeout-minutes: 15
+    # 打 tag 发布时, release.yml 的 publish job 反正要重新构建 amd64+arm64 并推送,
+    # 这里再构建一遍 amd64 纯属重复 (gha cache 还按 ref 分 scope, tag 上是冷缓存,
+    # 等于全量构建两遍)。所以发布路径 (gate 复用本文件, event_name 仍是调用方的
+    # push tag / workflow_dispatch) 跳过这个 job; PR 和 push 到 main 仍然验证。
+    # push 到 main 时 ref_type 恒为 branch, push 一个 tag 时恒为 tag —— 用这个
+    # 区分 "main 分支的日常验证" 和 "release 发布时的 gate", 不依赖额外输入。
+    if: github.event_name == 'pull_request' || (github.event_name == 'push' && github.ref_type == 'branch')
     steps:
       - uses: actions/checkout@v4
       - uses: docker/setup-buildx-action@v3

@@ -1,6 +1,6 @@
 # REST API 速查
 
-完整 OpenAPI 文档: `https://<host>:8443/docs` (FastAPI 自动生成,nginx 反代)
+完整 OpenAPI 文档: `http://<host>:8080/docs` (FastAPI 自动生成,nginx 反代)
 
 ## 核心 CRUD
 
@@ -11,8 +11,10 @@
 | GET | `/api/items/export.csv` | CSV 导出 (含 home 前缀的完整 location_path) |
 | GET | `/api/items/import-template.csv` | 导入模板 |
 | POST | `/api/items/import?mode=upsert\|append\|replace` | CSV 导入,自动按层级建缺失位置 |
+| GET | `/api/items/depleted` | 库存 ≤ 0 的"待补充"列表 (与"待归位"是两类提醒) |
 | POST/GET | `/api/items/{id}/transactions` | 单品流水 |
 | GET | `/api/transactions?q=&action=&location_id=&since=&until=&limit=` | 全局流水筛选 (每条带 `undoable` + `undo_note`) |
+| GET | `/api/transactions/pending-returns` | 借出未归位列表 (按物品滚动 take_out − put_in − consume 结余,下限 0) |
 | GET / POST / PATCH / DELETE | `/api/locations[/{id}]` | 位置 CRUD (含 home / room / 容器 / 家具) |
 
 ## 语音 / AI
@@ -74,15 +76,23 @@ location_name?, quantity}` → 返回 `stage="applied"`。
 
 Telegram 和飞书走出站长连接,无 HTTP 端点。
 
+## 备份 / 恢复 (WebDAV)
+
+| Method | Path | 说明 |
+|---|---|---|
+| GET / PATCH | `/api/backup/settings` | WebDAV 备份配置 (URL / 账号密码 / 组件 / 调度 / GFS 保留,敏感字段脱敏返回) |
+| POST | `/api/backup/test` | 测试 WebDAV 连通性 |
+| POST | `/api/backup/run` | 立即执行一次备份,`components` 可覆盖默认选择 |
+| GET | `/api/backup/list` | 列出远端已有备份点 |
+| GET | `/api/backup/download/{name}` | 下载某个备份包 |
+| DELETE | `/api/backup/{name}` | 删除某个备份点 |
+| POST | `/api/backup/restore` | 从 WebDAV 上已有的备份点恢复 |
+| POST | `/api/backup/restore-upload` | 从用户上传的备份包恢复 (无需 WebDAV) |
+
+详见 [`docs/backup.md`](backup.md)。
+
 ## 数据持久化
 
-```
-./data/
-├── storage.db       # SQLite 数据库 (items / locations / transactions / audit_logs)
-├── config.json      # LLM / 语音 / 机器人运行时配置 (含 API key,自行注意权限)
-└── certs/
-    ├── server.crt   # 自签证书 (持久化, 不会每次重建)
-    └── server.key
-```
-
-备份只需要 tar 这一个目录。
+数据目录布局、证书生命周期(CA 持久 / 服务器证书每次启动按 `LAN_IP` 重签)、
+`logs/` 等完整清单是部署文档的内容,不在这里重复,见
+[`docs/deployment.md` 的「数据持久化」章节](deployment.md#数据持久化)。

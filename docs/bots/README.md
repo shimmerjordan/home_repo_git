@@ -34,7 +34,9 @@
 1. 把 `@bot` / `/command` 前缀去掉,把剩余文本送到 [`llm/intent.py`](../../backend/app/llm/intent.py)
 2. 跑 `parse_intent` → `execute_intent` pipeline,共享语音那条管线
 3. **强制静默执行**:在 IM 上下文里没法语音确认,所以 `take_out / put_in / create_item` 的 confidence 拉满,直接执行
-4. 把候选 / 推荐渲染成各平台支持的富文本(钉钉 Markdown、Telegram MarkdownV2、飞书 text/post)
+4. 把候选 / 推荐渲染成各平台支持的富文本(钉钉 `markdown` 消息类型;Telegram 用旧版
+   `parse_mode: Markdown`,不是 MarkdownV2;飞书目前只发纯文本 `text` 消息类型,更花哨的
+   `post` / `interactive` 卡片还没做,是已知 TODO)
 5. 应用配置的白名单(staffId / chat_id / open_id),防止陌生人滥用
 6. 写诊断日志,方便排查
 
@@ -48,4 +50,8 @@
 - 消息解析(各家都有自己的 `text.content` / `message.body` 字段名)
 - 回复 API(各家的 `sendMessage` 等价物)
 
-业务逻辑可以直接复用 `_run_intent` / `_format_reply`。
+业务逻辑可以直接复用:两边都是调 `llm/intent.py` 的 `parse_intent` + `execute_intent` 这条
+pipeline;`_format_reply`(渲染候选/推荐成文本)只在 `telegram.py` 里实现了一份,`feishu.py`
+是直接 `import` 复用同一个函数,没有各写各的;`_run_intent` 这层"跑 pipeline 拿到回复文本"
+的封装目前只有 `feishu.py` 有,Telegram 侧对应逻辑内联在 `_handle_update` 里,想抄的话按
+需要重新抽一层即可。

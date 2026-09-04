@@ -39,7 +39,9 @@
   - **OpenAI 兼容**(默认): 任何提供 `/v1/chat/completions` 的服务都行
   - **Anthropic (Claude)**: `/v1/messages`,支持 Claude 官方 API 和 **cc-trans 反代**(API Key 填 `cct-...` 客户端令牌,Base URL 填 cc-trans 地址如 `http://host.docker.internal:8787`)
 - 内置预设:**OpenAI / 硅基流动 / DeepSeek / Ollama / 智谱 GLM / Claude 官方 / cc-trans**
-- 运行时改 `base_url` + `api_format` + `api_key` + `model` + `temperature` + `timeout` + `max_tokens`,**无需重启**
+- 运行时改 `base_url` + `api_format` + `api_key` + `model` + `temperature` + `timeout` + `max_tokens` +
+  `thinking` + `effort`,**无需重启**(后两者仅 Anthropic 格式生效: `thinking` = 空/`adaptive`/`disabled`,
+  `effort` = 空/`low`/`medium`/`high`/`xhigh`/`max`;留空 = 不传该字段,兼容不认 adaptive/effort 的老模型如 Haiku 4.5)
 - 自动用工具调用(OpenAI `tool_calls` / Anthropic `tool_use`),模型不支持时降级为 JSON 模式
 - "测试连接"按钮一键验证
 
@@ -73,12 +75,16 @@
 两处都有的电池、库存为 0 的抽纸),跑 `parse_intent` + `plan_operations`,逐条比对
 意图 / 操作条数 / 每条落点 / 数量 / 位置,按分类出准确率。不落库(每个 case 一份内存 sqlite)。
 
-```bash
-# 源码 bind mount 进去跑, 不用重建镜像。CONFIG_PATH 要指向可写目录
-docker run --rm -v "$PWD/backend:/src" -v /tmp/ev:/cfg -w /src \
-  -e CONFIG_PATH=/cfg/config.json storage-app python -m eval.run_eval
+`backend/tests` 和 `backend/eval` **不进镜像**(`Dockerfile` 只 `COPY backend/app`),必须把源码
+bind mount 进去跑;镜像名不是 `docker-compose.yml` 里的 `container_name: storage-app`,而是
+`build: .` 那个 service (`app`) 编译出来的 `repo_git-app`(`docker compose images` 可核实,
+项目目录名不同则前缀会变):
 
-python -m eval.run_eval --replay              # 离线回放录好的 cassette (CI 用这条)
+```bash
+docker run --rm -v "$PWD/backend:/src" -w /src \
+  -e CONFIG_PATH=/tmp/eval-config.json repo_git-app python -m eval.run_eval
+
+python -m eval.run_eval --replay --network none  # 离线回放录好的 cassette (CI 用这条, 顺手断网)
 python -m eval.run_eval --compare             # max_tokens 512 vs 4096 对比
 python -m eval.run_eval --only multi,mixed    # 只跑最难的两类
 python -m eval.run_eval --case mixed-4        # 只跑一条, 调 prompt 时用
@@ -91,7 +97,7 @@ python -m eval.run_eval --case mixed-4        # 只跑一条, 调 prompt 时用
 单元测试(不联网、不要 key):
 
 ```bash
-docker run --rm -v "$PWD/backend:/src" -w /src/tests storage-app python -m unittest discover -s .
+docker run --rm -v "$PWD/backend:/src" -w /src/tests repo_git-app python -m unittest discover -s .
 ```
 
 ## iOS / iPad 注意事项

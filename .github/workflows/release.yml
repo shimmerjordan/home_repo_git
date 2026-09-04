@@ -21,6 +21,13 @@ permissions:
   contents: write     # 建 release / 传资产
   packages: write     # 推 GHCR
 
+# 用版本号分组, 保证同一个 tag 不会被重复发布两次撞在一起; 发布过程(尤其推镜像
+# 之后)中途被取消会留下半成品 release/镜像 tag, 所以绝不 cancel-in-progress ——
+# 撞车时排队等前一个跑完, 而不是互相打断。
+concurrency:
+  group: release-${{ github.event.inputs.tag || github.ref_name }}
+  cancel-in-progress: false
+
 jobs:
   # 发布前的闸门: 测试不过就不发。复用 ci.yml, 不重复写一遍。
   # 注意: 走 workflow_dispatch 手动发布时, 这个 gate 跑的是**发起 dispatch 那个分支**
@@ -31,10 +38,29 @@ jobs:
   publish:
     needs: gate
     runs-on: ubuntu-latest
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@v4
         with:
           ref: ${{ github.event.inputs.tag || github.ref }}
+
+      - name: 校验 gate 测的 commit 与要发布的 tag 是否一致 (仅 workflow_dispatch)
+        # 上面 gate job 复用 ci.yml 是本地 `uses: ./...` 引用, 规范规定这种引用
+        # 只能跑"触发本次 release.yml 运行"那个 commit 的代码, 不能指定成
+        # inputs.tag 的 commit (uses: 里也不允许塞表达式)。推 tag 触发时两者
+        # 天然一致; workflow_dispatch 手动触发时如果没有把 "Use workflow from"
+        # 选成这个 tag, gate 测的其实是别的 commit。结构上修不掉, 这里只做
+        # 运行期告警, 不拦截 —— 报错换成硬失败风险更大 (见 PR 描述权衡)。
+        if: github.event_name == 'workflow_dispatch'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAG: ${{ github.event.inputs.tag }}
+        run: |
+          set -euo pipefail
+          TAG_SHA="$(gh api "repos/${{ github.repository }}/commits/${TAG}" --jq .sha)"
+          if [ "${TAG_SHA}" != "${{ github.sha }}" ]; then
+            echo "::warning::workflow_dispatch 触发, 但 gate 测的是发起 dispatch 的分支 commit (${{ github.sha }}), 不是 tag ${TAG} 指向的 commit (${TAG_SHA})。这次发布没有被 gate 真正测过 —— 如果不是故意的, 取消后重新 dispatch 并把 'Use workflow from' 选成这个 tag。"
+          fi
 
       - name: 算出版本号、镜像 tag 列表
         id: meta
@@ -113,8 +139,11 @@ jobs:
         run: |
           set -euo pipefail
           mkdir -p dist
-          # compose 模板里的 __IMAGE__ 换成带版本号的镜像地址
-          sed "s|__IMAGE__|${IMG}|g" deploy/compose.release.yml > dist/compose.yml
+          # 源码版 docker-compose.yml 的 `build: .` 换成钉死版本的 image, 并加
+          # pull_policy: missing (只认本地已有镜像; 没有才拉, 有就用本地, 避免
+          # 升级时悄悄用旧的)。以前维护一份专门的 deploy/compose.release.yml
+          # 模板跟它保持一致, 现在直接从源头生成, 没有第二份文件可以跑偏。
+          sed "s|build: \.|image: ${IMG}\n    pull_policy: missing|" docker-compose.yml > dist/compose.yml
           # 发布正文里的三个占位符
           sed -e "s|__VERSION__|${V}|g" \
               -e "s|__IMAGE__|${IMG}|g" \
