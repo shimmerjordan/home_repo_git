@@ -344,28 +344,39 @@ def _all_items(db: Session) -> list[models.Item]:
     return c["items"]
 
 
-def _resolve_location(db: Session, ref: dict[str, Any]) -> int | None:
-    """Resolve location_id / location_name to a real Location id (or None).
-    Exact name match wins; falls back to substring match on name or full path."""
+def _resolve_location(
+    db: Session, ref: dict[str, Any]
+) -> tuple[int | None, list[models.Location]]:
+    """把 location_id / location_name 解析成真实 Location id。
+
+    返回 (命中id, 歧义候选)。规则: 精确名 (大小写不敏感) 直接胜出; 没有精确名时
+    收集**全部**子串候选 —— 恰好一个就用它, 多个就一个都不选, 把候选交回给调用方
+    让用户挑。老实现取第一个子串命中, "书桌1"会静默落到"书桌10"上。
+    """
     if ref.get("location_id"):
         loc = db.get(models.Location, ref["location_id"])
         if loc:
-            return loc.id
+            return loc.id, []
     name = (ref.get("location_name") or "").strip()
     if not name:
-        return None
+        return None, []
     name_lower = name.lower()
-    fallback: int | None = None
+    candidates: list[models.Location] = []
     for loc in _all_locations(db):
         ln = (loc.name or "").lower()
         if ln == name_lower:
-            return loc.id
-        if fallback is None and (
-            name_lower in ln or ln in name_lower
-            or name_lower in location_path(loc).lower()
-        ):
-            fallback = loc.id
-    return fallback
+            return loc.id, []
+        if (name_lower in ln or ln in name_lower
+                or name_lower in location_path(loc).lower()):
+            candidates.append(loc)
+    if len(candidates) == 1:
+        return candidates[0].id, []
+    if candidates:
+        # 名字长度最接近的排前面, 同长按全路径排 —— 只影响展示顺序, 不影响"不猜"。
+        candidates.sort(key=lambda l: (abs(len(l.name or "") - len(name)),
+                                       location_path(l)))
+        return None, candidates
+    return None, []
 
 
 # 截断重试的放大倍数与硬上限。一次翻 4 倍足够覆盖"思考块吃掉大半预算"的情况。
@@ -647,6 +658,7 @@ def _do_find(db: Session, op: dict[str, Any]) -> dict[str, Any]:
         "quantity": op["quantity"], "executed": False, "transaction_id": None,
         "speech": "", "candidates": _cand_dicts(cands), "matched_by": how,
         "pending": False, "location_path": None, "remaining": None,
+        "location_options": [],
     }
     if not item:
         r["speech"] = f"没找到{op.get('item_name') or '该物品'}"
@@ -731,8 +743,10 @@ def _plan_one(db: Session, op: dict[str, Any]) -> dict[str, Any]:
         selected, matched_by = OPT_SKIP, "none"
         reason = f"库里没有「{name or '该物品'}」"
 
-    loc_id = _resolve_location(db, op)
+    loc_id, loc_ambig = _resolve_location(db, op)
     loc = db.get(models.Location, loc_id) if loc_id else None
+    if loc_ambig:
+        reason += f"; 位置「{op.get('location_name')}」有 {len(loc_ambig)} 个候选, 请选一个"
     return {
         "intent": intent,
         "item_id": None if selected in (OPT_NEW, OPT_SKIP) else parse_option_key(selected)[1],
@@ -747,6 +761,10 @@ def _plan_one(db: Session, op: dict[str, Any]) -> dict[str, Any]:
         "location_id": loc_id,
         "location_name": op.get("location_name"),
         "location_path": location_path(loc) if loc else None,
+        "location_options": [
+            {"location_id": l.id, "name": l.name, "path": location_path(l)}
+            for l in loc_ambig
+        ],
         "remaining": None,
         # 方案专属字段
         "options": options,
@@ -834,14 +852,21 @@ def apply_operations(
             continue
         qty = max(1, _coerce_int(d.get("quantity")) or 1)
         kind, item_id = parse_option_key(d.get("option_key") or "")
-        loc_id = _resolve_location(db, d)
+        loc_id, loc_ambig = _resolve_location(db, d)
         r: dict[str, Any] = {
             "intent": intent, "item_id": item_id,
             "item_name": (d.get("new_item_name") or "").strip() or None,
             "quantity": qty, "executed": False, "transaction_id": None,
             "speech": "", "candidates": [], "matched_by": "", "pending": False,
-            "location_path": None, "remaining": None,
+            "location_path": None, "remaining": None, "location_options": [],
         }
+        if loc_ambig:
+            # 位置没能唯一确定 —— 宁可这条不落库, 也不要猜一个位置糊弄过去。
+            r["speech"] = f"位置「{d.get('location_name')}」不明确, 没执行"
+            r["pending"] = True
+            results.append(r)
+            fragments.append(r["speech"])
+            continue
         if kind == OPT_SKIP:
             r["speech"] = f"已跳过{_OP_VERB.get(intent, intent)}{r['item_name'] or '这一条'}"
             results.append(r)
@@ -957,6 +982,7 @@ def _execute_batch(
             "pending": False,
             "location_path": None,
             "remaining": None,
+            "location_options": [],
         }
         item: models.Item | None = None
         if intent == "find":
@@ -979,29 +1005,41 @@ def _execute_batch(
             if not name:
                 r["speech"] = "有一项缺少物品名称"
             else:
-                loc_id = _resolve_location(db, op)
-                if op.get("force_new"):
-                    item, tx = _create_item_forced(
-                        db, name, qty, loc_id, note="语音新增(批量)")
-                    merged = False
+                loc_id, loc_ambig = _resolve_location(db, op)
+                if loc_ambig:
+                    # 位置没能唯一确定 —— 这条不落库, 等用户挑清楚了再说。
+                    r["pending"] = True
+                    r["matched_by"] = "none"
+                    r["speech"] = f"位置「{op.get('location_name')}」不明确, 没执行"
                 else:
-                    item, tx, merged = _create_or_merge_item(
-                        db, name, qty, loc_id, note="语音创建(批量)")
-                mutated = True
-                r.update(item_id=item.id, item_name=item.name,
-                         executed=True, transaction_id=tx.id)
-                r["candidates"] = _cand_dicts([item])
-                r["matched_by"] = "exact" if merged else "created"
-                if merged:
-                    r["speech"] = f"已存入{item.name}×{qty}(共{item.quantity})"
-                else:
-                    r["speech"] = f"已新增{item.name}×{qty}"
+                    if op.get("force_new"):
+                        item, tx = _create_item_forced(
+                            db, name, qty, loc_id, note="语音新增(批量)")
+                        merged = False
+                    else:
+                        item, tx, merged = _create_or_merge_item(
+                            db, name, qty, loc_id, note="语音创建(批量)")
+                    mutated = True
+                    r.update(item_id=item.id, item_name=item.name,
+                             executed=True, transaction_id=tx.id)
+                    r["candidates"] = _cand_dicts([item])
+                    r["matched_by"] = "exact" if merged else "created"
+                    if merged:
+                        r["speech"] = f"已存入{item.name}×{qty}(共{item.quantity})"
+                    else:
+                        r["speech"] = f"已新增{item.name}×{qty}"
         else:
             item, cands, how = _find_item_for_op(db, op)
             r["candidates"] = _cand_dicts(cands)
             r["matched_by"] = how
-            loc_id = _resolve_location(db, op)
-            if not item:
+            loc_id, loc_ambig = _resolve_location(db, op)
+            if loc_ambig:
+                # 位置没能唯一确定 —— 这条不落库, 等用户挑清楚了再说。
+                item = None
+                r["pending"] = True
+                r["matched_by"] = "none"
+                r["speech"] = f"位置「{op.get('location_name')}」不明确, 没执行"
+            elif not item:
                 name = (op.get("item_name") or "").strip()
                 if intent == "put_in" and name:
                     # "把手表放进书桌1" 而库存里没有手表 —— 按用户意图直接建到目标位置。
@@ -1082,6 +1120,7 @@ def _single_op(
         "pending": pending,
         "location_path": location_path(item.location) if (item and item.location) else None,
         "remaining": item.quantity if item else None,
+        "location_options": [],
     }
 
 
@@ -1166,7 +1205,7 @@ def execute_intent(
 
     # Resolve a location name ("书桌1") to an id for the single-op path.
     if not parsed.get("location_id") and parsed.get("location_name"):
-        parsed["location_id"] = _resolve_location(db, parsed)
+        parsed["location_id"], _ = _resolve_location(db, parsed)
 
     # Build candidate display.
     cand_ids = parsed.get("candidates") or []

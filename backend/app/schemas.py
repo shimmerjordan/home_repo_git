@@ -168,6 +168,8 @@ class IntentOperationResult(BaseModel):
     reason: str = ""                # 为什么这么预选 (给用户看的一句人话)
     location_id: Optional[int] = None
     location_name: Optional[str] = None
+    # 位置名有多个子串候选、解析不出唯一位置时的候选列表; 前端据此让用户挑, 而不是被静默猜中。
+    location_options: list[dict[str, Any]] = []
 
 
 class IntentResult(BaseModel):
