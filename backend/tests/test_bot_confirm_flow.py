@@ -394,6 +394,55 @@ class BotFlowTest(unittest.TestCase):
         self.assertIsNone(pending.peek("tg", "c1", ""), "空身份不许存待确认")
         self.assertIn("认不出", reply)
 
+    def test_low_confidence_without_sender_id_refuses(self):
+        """低置信度那条分支也会存 pending —— 所以它同样需要认得出说话人。
+        上一轮只在高风险分支加了守卫, 这条是补上的另一半。"""
+        import asyncio
+        from app.llm import intent as I
+        from app.services import botflow, pending
+        from _fixtures import make_session, seed, item_by
+        db = make_session(); items = seed(db)[1]
+        luosidao = item_by(items, "螺丝刀")
+        before_qty = luosidao.quantity
+        orig = I.parse_intent
+        I.parse_intent = self._fake_parse_conf([
+            {"intent": "take_out", "item_name": "螺丝刀", "quantity": 1,
+             "item_id": None, "location_id": None, "location_name": None,
+             "force_new": False}], 0.2)
+        try:
+            reply = asyncio.run(botflow.handle_bot_message(
+                "tg", "c1", "", "拿个螺丝刀", db, self._cfg()))
+        finally:
+            I.parse_intent = orig
+        self.assertIsNone(pending.peek("tg", "c1", ""), "空身份不许存待确认")
+        self.assertIn("认不出", reply)
+        db.refresh(luosidao)
+        self.assertEqual(luosidao.quantity, before_qty, "拒绝时不能写库")
+
+    def test_low_risk_still_works_without_sender_id(self):
+        """低风险直接执行不存 pending, 不需要身份 —— 守卫不该挡它。"""
+        import asyncio
+        from app.llm import intent as I
+        from app.services import botflow, pending
+        from _fixtures import make_session, seed, item_by
+        db = make_session(); items = seed(db)[1]
+        luosidao = item_by(items, "螺丝刀")
+        before_qty = luosidao.quantity
+        orig = I.parse_intent
+        I.parse_intent = self._fake_parse([
+            {"intent": "take_out", "item_name": "螺丝刀", "quantity": 1,
+             "item_id": None, "location_id": None, "location_name": None,
+             "force_new": False}])
+        try:
+            reply = asyncio.run(botflow.handle_bot_message(
+                "tg", "c1", "", "拿个螺丝刀", db, self._cfg()))
+        finally:
+            I.parse_intent = orig
+        self.assertIsNone(pending.peek("tg", "c1", ""))
+        self.assertNotIn("认不出", reply)
+        db.refresh(luosidao)
+        self.assertEqual(before_qty - luosidao.quantity, 1, "低风险该照常执行")
+
 
 class ChannelWiringTest(unittest.TestCase):
     """三端传给公共流程的 (channel, chat_id, sender_id, text) 四元组。

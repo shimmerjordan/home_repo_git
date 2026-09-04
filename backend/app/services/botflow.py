@@ -86,6 +86,11 @@ async def handle_bot_message(
         # 而且这条操作再也没法触发。
         # (plan_risk 只看匹配质量和操作种类, 不看 LLM 自报的 confidence,
         #  所以这道门槛是它覆盖不到的另一条路。)
+        if not str(sender_id or "").strip():
+            # 和高风险分支同一个理由: 认不出说话人时 pending 的 key 会退化成
+            # (渠道, 会话, ""), 同群里任何人回"确认"都能执行这一条。
+            # 凡是要存待确认的路径都得先能认出人, 不分高低风险。
+            return "这句话我不太确定, 但我认不出是谁在说话, 没法走确认流程。请说得更具体一点。"
         plan["_text"] = text
         pending.put(channel, chat_id, sender_id, plan)
         return botfmt.format_plan(plan, "AI 对这句话不太确定")
