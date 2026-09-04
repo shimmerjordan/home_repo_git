@@ -12,6 +12,7 @@ from ..database import get_db
 from ..services import audit
 from ..services.inventory import (
     annotate_undoable,
+    apply_quantity_delta,
     location_path,
     search_items,
     serialize_item,
@@ -368,15 +369,7 @@ def record_transaction(
     if payload.item_id != item_id:
         raise HTTPException(400, "item_id mismatch")
     qty = payload.quantity
-    if payload.action == "take_out":
-        item.quantity = max(0, (item.quantity or 0) - qty)
-    elif payload.action == "put_in":
-        item.quantity = (item.quantity or 0) + qty
-        if payload.location_id:
-            item.location_id = payload.location_id
-    elif payload.action == "adjust":
-        item.quantity = qty
-    item.updated_at = datetime.now()
+    apply_quantity_delta(item, payload.action, qty, payload.location_id)
     tx = models.Transaction(**payload.model_dump())
     db.add(tx)
     db.flush()

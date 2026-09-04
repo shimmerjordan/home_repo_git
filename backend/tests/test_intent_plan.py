@@ -424,5 +424,102 @@ class LookupCacheTest(unittest.TestCase):
         self.assertEqual(n["c"], 0)
 
 
+class UnifiedPathTest(unittest.TestCase):
+    """非 plan 路径 (群机器人走的那条) 以前 put_in 找不到物品就静默新建,
+    而 plan 路径会问用户。两条路径必须一致: 除非明确 force_new, 否则不许自动建档。"""
+
+    def test_batch_putin_unknown_item_does_not_autocreate(self):
+        db = make_session()
+        seed(db)
+        before = db.query(models.Item).count()
+        parsed = {"intent": "put_in", "confidence": 1.0, "speech": "",
+                  "operations": [{"intent": "put_in", "item_name": "跑步机",
+                                  "quantity": 1, "location_name": "书房",
+                                  "item_id": None, "location_id": None,
+                                  "force_new": False}]}
+        from app.config import store
+        r = I.execute_intent(db, "把跑步机放进书房", parsed, store.get())
+        self.assertEqual(db.query(models.Item).count(), before,
+                         "不该静默新建物品档案")
+        op = r["operations"][0]
+        self.assertTrue(op["pending"])
+        self.assertFalse(op["executed"])
+
+    def test_batch_putin_with_force_new_still_creates(self):
+        """明确说了是新东西, 照建不误 —— 收紧的是"没说"的情况。"""
+        db = make_session()
+        seed(db)
+        parsed = {"intent": "put_in", "confidence": 1.0, "speech": "",
+                  "operations": [{"intent": "put_in", "item_name": "跑步机",
+                                  "quantity": 1, "location_name": "书房",
+                                  "item_id": None, "location_id": None,
+                                  "force_new": True}]}
+        from app.config import store
+        I.execute_intent(db, "新增跑步机到书房", parsed, store.get())
+        self.assertEqual(
+            db.query(models.Item).filter(models.Item.name == "跑步机").count(), 1)
+
+    def test_execute_batch_putin_unknown_item_does_not_autocreate(self):
+        """上面两条测的是单条操作折回顶层字段那条路; 这条专测 _execute_batch
+        本身 (>=2 条操作才会走到) —— 两条子路径都得收紧, 不能只堵一个口子。"""
+        db = make_session()
+        seed(db)
+        before = db.query(models.Item).count()
+        parsed = {"intent": "put_in", "confidence": 1.0, "speech": "",
+                  "operations": [
+                      {"intent": "put_in", "item_name": "跑步机", "quantity": 1,
+                       "location_name": "书房", "item_id": None,
+                       "location_id": None, "force_new": False},
+                      {"intent": "put_in", "item_name": "螺丝", "quantity": 2,
+                       "location_name": "工具箱", "item_id": None,
+                       "location_id": None, "force_new": False},
+                  ]}
+        from app.config import store
+        r = I.execute_intent(db, "把跑步机和螺丝放进书房和工具箱", parsed, store.get())
+        self.assertEqual(db.query(models.Item).count(), before,
+                         "不该静默新建物品档案")
+        new_op = next(o for o in r["operations"] if o["item_name"] == "跑步机")
+        self.assertTrue(new_op["pending"])
+        self.assertFalse(new_op["executed"])
+        # 同批里认得出的那条不能被连累。
+        known_op = next(o for o in r["operations"] if o["item_name"] == "螺丝")
+        self.assertTrue(known_op["executed"])
+
+    def test_execute_batch_putin_with_force_new_still_creates(self):
+        db = make_session()
+        seed(db)
+        parsed = {"intent": "put_in", "confidence": 1.0, "speech": "",
+                  "operations": [
+                      {"intent": "put_in", "item_name": "跑步机", "quantity": 1,
+                       "location_name": "书房", "item_id": None,
+                       "location_id": None, "force_new": True},
+                      {"intent": "put_in", "item_name": "螺丝", "quantity": 2,
+                       "location_name": "工具箱", "item_id": None,
+                       "location_id": None, "force_new": False},
+                  ]}
+        from app.config import store
+        I.execute_intent(db, "新增跑步机到书房, 再放两个螺丝到工具箱", parsed, store.get())
+        self.assertEqual(
+            db.query(models.Item).filter(models.Item.name == "跑步机").count(), 1)
+
+
+class QuantityDeltaTest(unittest.TestCase):
+    def test_adjust_is_absolute_not_delta(self):
+        from app.services.inventory import apply_quantity_delta
+        db = make_session()
+        _, items = seed(db)
+        it = next(i for i in items if i.name == "螺丝" )
+        apply_quantity_delta(it, "adjust", 5, None)
+        self.assertEqual(it.quantity, 5)
+
+    def test_take_out_clamps_at_zero(self):
+        from app.services.inventory import apply_quantity_delta
+        db = make_session()
+        _, items = seed(db)
+        it = next(i for i in items if i.name == "洗手液")
+        apply_quantity_delta(it, "take_out", 99, None)
+        self.assertEqual(it.quantity, 0)
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

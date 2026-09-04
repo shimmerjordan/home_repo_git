@@ -18,7 +18,12 @@ from sqlalchemy.orm import Session
 from .. import models
 from ..database import get_db
 from ..services import audit
-from ..services.inventory import UNDOABLE_ACTIONS, location_path, serialize_item
+from ..services.inventory import (
+    UNDOABLE_ACTIONS,
+    apply_quantity_delta,
+    location_path,
+    serialize_item,
+)
 
 router = APIRouter(prefix="/api/revise", tags=["revise"])
 
@@ -139,13 +144,7 @@ def redirect(body: RedirectBody, db: Session = Depends(get_db)):
         created = True
 
     # 重新施加同一个动作。语义与 llm/intent._apply_stock_op 保持一致。
-    if action in ("take_out", "consume"):
-        target_item.quantity = max(0, (target_item.quantity or 0) - qty)
-    else:  # put_in
-        target_item.quantity = (target_item.quantity or 0) + qty
-        if loc_id:
-            target_item.location_id = loc_id
-    target_item.updated_at = datetime.now()
+    apply_quantity_delta(target_item, action, qty, loc_id)
 
     new_tx = models.Transaction(
         item_id=target_item.id,

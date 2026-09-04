@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import json
+from datetime import datetime
 from typing import Iterable
 
 from sqlalchemy import func, or_
@@ -68,6 +69,23 @@ def serialize_location(loc: models.Location) -> dict:
 
 # 只有这三种流水存得下"操作前的值", 才回滚得回去 (与 routers/revise.py 保持一致)。
 UNDOABLE_ACTIONS = {"take_out", "put_in", "consume"}
+
+
+def apply_quantity_delta(item, action: str, qty: int, loc_id: int | None) -> None:
+    """按动作改物品的数量与位置。**只动 item, 不建 Transaction** ——
+    三个调用方 (语音执行 / 改判 / 手动记一笔) 的 tx 构造方式各不相同, 硬凑一起反而容易错。
+
+    adjust 是绝对赋值 (手动盘点"现在还剩 N 个"), 其余是增减。
+    """
+    if action in ("take_out", "consume"):
+        item.quantity = max(0, (item.quantity or 0) - qty)
+    elif action == "put_in":
+        item.quantity = (item.quantity or 0) + qty
+        if loc_id:
+            item.location_id = loc_id
+    elif action == "adjust":
+        item.quantity = qty
+    item.updated_at = datetime.now()
 
 
 def serialize_transaction(tx: models.Transaction) -> dict:

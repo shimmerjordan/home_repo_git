@@ -4,8 +4,9 @@ from __future__ import annotations
 
 import unittest
 
-from _fixtures import make_session, seed
+from _fixtures import item_by, make_session, seed
 from app import models
+from app.config import AppConfig
 from app.llm import intent as I
 
 
@@ -86,6 +87,30 @@ class ApplySkipLocationAmbiguityTest(unittest.TestCase):
         op = r["operations"][0]
         self.assertIn("跳过", op["speech"])
         self.assertNotIn("不明确", op["speech"])
+
+
+class DirectPathLocationAmbiguityTest(unittest.TestCase):
+    """单条直连路径 (plan_only=False, 群机器人/关掉二次确认的语音走的那条) 以前遇到
+    位置歧义会用 `_` 把候选丢掉, location_id 变成 None, 高置信度时照样 commit ——
+    这个组合 (plan_only=False + 位置歧义 + 高置信度) 以前完全没测试覆盖。"""
+
+    def test_high_confidence_putin_with_ambiguous_location_does_not_execute(self):
+        db = make_session()
+        by_path, items = seed(db)
+        db.add(models.Location(name="书桌10", kind="box",
+                               parent_id=by_path["我家/书房"].id))
+        db.flush()
+        juanchi = item_by(items, "卷尺")
+        before_qty = juanchi.quantity
+        parsed = {"intent": "put_in", "confidence": 1.0, "speech": "",
+                  "item_id": juanchi.id, "location_name": "书桌", "quantity": 1}
+        r = I.execute_intent(db, "把卷尺放进书桌", parsed, AppConfig())
+        db.refresh(juanchi)
+        self.assertEqual(juanchi.quantity, before_qty, "不该悄悄丢掉位置继续执行")
+        self.assertFalse(r["executed"])
+        self.assertTrue(r["needs_confirmation"])
+        self.assertIn("不明确", r["speech"])
+        self.assertIn("书桌", r["speech"])
 
 
 if __name__ == "__main__":

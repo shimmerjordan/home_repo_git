@@ -18,7 +18,7 @@ from sqlalchemy.orm import Session
 
 from .. import models
 from ..config import AppConfig
-from ..services.inventory import location_path, search_items
+from ..services.inventory import apply_quantity_delta, location_path, search_items
 from ..services.logbuffer import app_log
 from ..services.summary import build_summary
 
@@ -535,13 +535,7 @@ def _apply_stock_op(
     loc_id: int | None, note: str = "语音操作",
 ) -> models.Transaction:
     """take_out / consume / put_in on an existing item. Flushes (no commit)."""
-    if intent in ("take_out", "consume"):
-        item.quantity = max(0, (item.quantity or 0) - qty)
-    else:  # put_in
-        item.quantity = (item.quantity or 0) + qty
-        if loc_id:
-            item.location_id = loc_id
-    item.updated_at = datetime.now()
+    apply_quantity_delta(item, intent, qty, loc_id)
     tx = models.Transaction(
         item_id=item.id,
         action=intent,
@@ -871,6 +865,10 @@ def apply_operations(
             # 位置没能唯一确定 —— 宁可这条不落库, 也不要猜一个位置糊弄过去。
             r["speech"] = f"位置「{d.get('location_name')}」不明确, 没执行"
             r["pending"] = True
+            r["location_options"] = [
+                {"location_id": l.id, "name": l.name, "path": location_path(l)}
+                for l in loc_ambig
+            ]
             results.append(r)
             fragments.append(r["speech"])
             continue
@@ -1044,16 +1042,25 @@ def _execute_batch(
             elif not item:
                 name = (op.get("item_name") or "").strip()
                 if intent == "put_in" and name:
-                    # "把手表放进书桌1" 而库存里没有手表 —— 按用户意图直接建到目标位置。
-                    item, tx, _merged = _create_or_merge_item(
-                        db, name, qty, loc_id, note="语音存入(自动新建)")
-                    mutated = True
-                    r.update(item_id=item.id, item_name=item.name,
-                             executed=True, transaction_id=tx.id)
-                    r["candidates"] = _cand_dicts([item])
-                    r["matched_by"] = "created"
-                    loc_text = location_path(item.location) if item.location else "未指定位置"
-                    r["speech"] = f"库里没有{item.name}, 已新建×{qty}放到{loc_text}"
+                    if op.get("force_new"):
+                        # "新增/新建" 这类措辞明说了是新东西 —— 照建不误。
+                        item, tx, _merged = _create_or_merge_item(
+                            db, name, qty, loc_id, note="语音存入(新建)")
+                        mutated = True
+                        r.update(item_id=item.id, item_name=item.name,
+                                 executed=True, transaction_id=tx.id)
+                        r["candidates"] = _cand_dicts([item])
+                        r["matched_by"] = "created"
+                        loc_text = location_path(item.location) if item.location else "未指定位置"
+                        r["speech"] = f"库里没有{item.name}, 已新建×{qty}放到{loc_text}"
+                    else:
+                        # 不许静默建档 —— 与 plan 路径一致: 没明说是新东西就先问。
+                        r["pending"] = True
+                        r["matched_by"] = "none"
+                        r["speech"] = f"库里没有{name}, 要新建吗"
+                        op_results.append(r)
+                        fragments.append(r["speech"])
+                        continue
                 else:
                     r["speech"] = f"没找到{name or '该物品'}"
             else:
@@ -1206,8 +1213,30 @@ def execute_intent(
         parsed["force_new"] = bool(op.get("force_new"))
 
     # Resolve a location name ("书桌1") to an id for the single-op path.
+    loc_ambig: list[models.Location] = []
     if not parsed.get("location_id") and parsed.get("location_name"):
-        parsed["location_id"], _ = _resolve_location(db, parsed)
+        parsed["location_id"], loc_ambig = _resolve_location(db, parsed)
+
+    # 位置有歧义就不能悄悄丢掉继续写库 —— 以前这里用 `_` 把候选丢了, location_id
+    # 变成 None, create_item/put_in/take_out/consume 照样 commit, 话术还说"已存入
+    # 到未指定位置", 听起来像用户没说位置, 而不是"你说的位置有歧义"。
+    if loc_ambig and intent in {"take_out", "put_in", "consume", "create_item"}:
+        base["needs_confirmation"] = True
+        base["pending_action"] = {
+            "intent": intent,
+            "item_id": parsed.get("item_id"),
+            "item_name": parsed.get("item_name"),
+            "location_name": parsed.get("location_name"),
+            "location_options": [
+                {"location_id": l.id, "name": l.name, "path": location_path(l)}
+                for l in loc_ambig
+            ],
+            "quantity": int(parsed.get("quantity") or 1),
+        }
+        base["speech"] = (
+            f"位置「{parsed.get('location_name')}」不明确, "
+            f"有 {len(loc_ambig)} 个候选, 没执行")
+        return base
 
     # Build candidate display.
     cand_ids = parsed.get("candidates") or []
@@ -1367,6 +1396,18 @@ def execute_intent(
         if not item_id and candidates_objs:
             item_id = candidates_objs[0].id
         if not item_id:
+            name = (parsed.get("item_name") or "").strip()
+            if intent == "put_in" and name:
+                # 不许静默建档 —— 与批量路径 (_execute_batch) 一致: 没明说是新东西就先问,
+                # 单条(这里)和多条不能一个默默新建一个不建, 表现必须一样。
+                qty = int(parsed.get("quantity") or 1)
+                base["speech"] = speech or f"库里没有{name}, 要新建吗"
+                base["operations"] = [_single_op(
+                    intent, None, qty, pending=True, matched_by="none",
+                    candidates=base["candidates"] or None, speech=base["speech"],
+                )]
+                base["operations"][0]["item_name"] = name
+                return base
             base["intent"] = "unknown"
             base["speech"] = speech or "没找到这个物品,要不要先创建一个"
             return base
