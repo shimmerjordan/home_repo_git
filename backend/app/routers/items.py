@@ -512,5 +512,5 @@ def pending_returns(db: Session = Depends(get_db)):
             "return_location_id": ret_loc.id if ret_loc else None,
             "return_location_path": location_path(ret_loc) if ret_loc else None,
         })
-    out.sort(key=lambda r: r["last_take_at"] or "", reverse=True)
+    out.sort(key=lambda r: (r["last_take_at"] or "", r["item_id"]), reverse=True)
     return out

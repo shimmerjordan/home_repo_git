@@ -136,9 +136,15 @@ async function loadScene(force = false) {
   // localStorage on every refresh so changes made in BuildingPanel show up here.
   activeHomeId.value = loadActiveHome()
   try {
-    const [locs] = await store.loadAll(force)
+    // 从 resolve 出来的数组取, 不读 store 快照: onQuickActionDone 里 loadScene(true) 没
+    // await 就同步 emit('changed') -> invalidate(), gen 会在这次 force 请求还没返回时就
+    // 被推高一档; 请求真正 resolve 时 gen 不匹配, store.activeItems 不会被这次结果更新,
+    // 若这里读 store.activeItems.value 拿到的还是刷新前的旧物品列表, 3D 会闪一帧"刚变更
+    // 的位置 + 变更前的物品"。loadItems()/loadLocations() 的 .then 无论 gen 是否匹配都会
+    // return rows, 所以 loadAll() 的 resolve 值本身永远是这次请求的真实结果。
+    const [locs, all] = await store.loadAll(force)
     sceneLocations.value = locs
-    sceneItems.value = store.activeItems.value
+    sceneItems.value = all.filter((i) => (i.quantity || 0) > 0)
   } catch {}
 }
 

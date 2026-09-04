@@ -143,7 +143,9 @@ const store = useInventoryStore()
 async function load(force = false) {
   const [locs, its] = await store.loadAll(force)
   locations.value = locs.slice()            // 本地可编辑副本: applyEdit / history 直接改这个数组
-  items.value = store.activeItems.value
+  // 从 resolve 出来的数组取, 不读 store.activeItems 快照 —— 理由同 LocationManager.vue: 调
+  // 用方若 force 刷新后没等这次 load() 落地就先 invalidate(), 读快照会拿到刷新前的旧数据。
+  items.value = its.filter((i) => (i.quantity || 0) > 0)
 }
 onMounted(load)
 // 不能直接把 load 传给 watch —— 回调会收到 (newRefreshKey, old, onCleanup),

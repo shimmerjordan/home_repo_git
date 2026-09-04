@@ -23,7 +23,10 @@ const store = useInventoryStore()
 async function load(force = false) {
   const [locs, all] = await store.loadAll(force)
   locations.value = locs
-  items.value = store.activeItems.value     // 服务端默认过滤 quantity=0, 这里等价
+  // 从 resolve 出来的数组取, 不读 store.activeItems 快照 —— 若调用方 force 刷新后没等这次
+  // load() 落地就先 emit('changed') (进而 invalidate()), gen 错位会导致 store 快照没被这次
+  // 结果更新, 读快照就会拿到刷新前的旧物品列表。resolve 值本身永远是这次请求的真实结果。
+  items.value = all.filter((i) => (i.quantity || 0) > 0)   // 服务端默认过滤 quantity=0, 这里等价
 }
 onMounted(load)
 // 不能直接把 load 传给 watch —— 回调会收到 (newRefreshKey, old, onCleanup),

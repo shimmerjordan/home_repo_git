@@ -610,6 +610,7 @@ function loop() {
 }
 
 let cameraAnim = null
+let cameraAnimResolve = null
 function tweenCamera(camPos, target, duration = 800) {
   wake(duration + 200)
   const startCam = camera.position.clone()
@@ -618,12 +619,13 @@ function tweenCamera(camPos, target, duration = 800) {
   const endTgt = new THREE.Vector3(target.x, target.y, target.z)
   const t0 = performance.now()
   return new Promise((resolve) => {
+    cameraAnimResolve = resolve
     cameraAnim = () => {
       const t = Math.min(1, (performance.now() - t0) / duration)
       const e = 0.5 - 0.5 * Math.cos(Math.PI * t)
       camera.position.lerpVectors(startCam, endCam, e)
       controls.target.lerpVectors(startTgt, endTgt, e)
-      if (t >= 1) { cameraAnim = null; resolve() }
+      if (t >= 1) { cameraAnim = null; cameraAnimResolve = null; resolve() }
     }
     const orig = pulseTween
     pulseTween = () => { orig?.(); if (cameraAnim) cameraAnim() }
@@ -727,11 +729,14 @@ function occludeForMultiHighlight(targetItemIds) {
   }
 
   occlusionRestore = () => { restoreFns.forEach((fn) => { try { fn() } catch {} }) }
-  // Auto-restore after the pulse completes (~5s window).
+  // Auto-restore after the pulse completes (~5s window). By then the active window opened
+  // by pulseHighlight (wake(DURATION + 200), ~3.2s) has usually already expired and the RAF
+  // loop has stopped — restoring materials without a fresh wake() here would change the
+  // scene graph but never actually get drawn, leaving the ghosted-out scene stuck on screen.
   setTimeout(() => {
-    if (occlusionRestore) { occlusionRestore(); occlusionRestore = null }
+    if (occlusionRestore) { occlusionRestore(); occlusionRestore = null; wake() }
   }, 5000)
-  wake()
+  wake() // the ghost effect itself also needs at least one frame to show up
 }
 
 async function focusItem(itemId) {
@@ -1094,14 +1099,21 @@ onDeactivated(() => { activated = false; stopLoop() })
 
 function disposeAll() {
   stopLoop()
+  // tweenCamera() 的 Promise 只能被 loop() 驱动的 cameraAnim 链 resolve; 若卸载发生在一次
+  // tween 进行中, RAF 已停, 没人再来推进它, Promise 会永久 pending, 闭包 (camera/controls
+  // 的引用) 也跟着泄漏。这里直接 resolve 掉, 让等待它的 await 链正常走完。
+  if (cameraAnim) { cameraAnim = null; cameraAnimResolve?.(); cameraAnimResolve = null }
   io?.disconnect(); io = null
   resizeObserver?.disconnect(); resizeObserver = null
   controls?.dispose()
   transformControls?.dispose?.()
+  // 释放房间/物品网格的几何与材质 —— 不调用的话, GPU 资源要等 JS GC 才可能被回收(而且
+  // three.js 从不自动 dispose 场景图里的几何/材质, renderer.dispose() 也不会替它们做)。
+  clearObjects()
   disposeExtras()
   if (renderer) { renderer.dispose(); renderer.domElement.remove() }
-  // 置空, 否则 canRender() 里的 !!renderer 卸载后仍然为真, 判断失去意义。
-  scene = camera = renderer = controls = transformControls = null
+  // 置空, 否则 canRender() 里的 !!renderer 卸载后仍然为真, 判断失去意义; sun/floor 同理。
+  scene = camera = renderer = controls = transformControls = sun = floor = null
 }
 onBeforeUnmount(() => {
   document.removeEventListener('visibilitychange', onVisibility)
