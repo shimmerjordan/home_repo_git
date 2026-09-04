@@ -9,8 +9,11 @@
   python -m eval.run_eval --compare            # 512 vs 4096 两档对比
 
 评的是 parse_intent + plan_operations 的联合结果 —— 也就是用户在
-「最新识别结果」里真正会看到的那份方案。**不落库**: 每个 case 都用一份
-全新的内存 sqlite, 互不干扰。
+「最新识别结果」里真正会看到的那份方案。默认**不落库**: 每个 case 都用一份
+全新的内存 sqlite, 互不干扰。带 `decisions` 字段的 case (cat="apply") 是例外——
+它们会在 plan 之后真的跑一次 apply_operations 并 commit, 用来验证"确认之后
+库里到底变成什么样"; 落库仍然只发生在该 case 自己的内存 sqlite 里, 不会跨
+case 互相污染。
 """
 from __future__ import annotations
 
@@ -214,7 +217,7 @@ async def run_once(cfg: AppConfig, cases, verbose=False) -> dict:
                  stage=result.get("stage"))
         rows.append(s)
         if verbose:
-            flag = "OK " if s["exact"] and not err else "BAD"
+            flag = "OK " if s["exact"] and not err and s.get("after_ok") is not False else "BAD"
             print(f"  [{flag}] {case['id']:22s} {ms:6.0f}ms  "
                   f"期望{len(case['ops'])}条/实得{s['got']}条"
                   + (f"  ← {err}" if err else ""))
@@ -255,7 +258,8 @@ def report(label: str, rows: list[dict]) -> None:
           f"{sum(r['target_ok'] for r in rows) / n * 100:>7.0f}%"
           f"{_after_pct(rows)}"
           f"{sum(r['ms'] for r in rows) / n:>8.0f}ms")
-    bad = [r for r in rows if not r["exact"] or r["err"]]
+    bad = [r for r in rows
+           if not r["exact"] or r["err"] or r.get("after_ok") is False]
     if bad:
         print(f"\n--- 失败明细 ({len(bad)}/{n}) ---")
         for r in bad:
@@ -337,7 +341,8 @@ def main() -> int:
     out = asyncio.run(run_once(cfg, cases, verbose=not args.quiet))
     report("总览", out["rows"])
     rows = out["rows"]
-    return 0 if all(r["exact"] and not r["err"] for r in rows) else 1
+    return 0 if all(r["exact"] and not r["err"] and r.get("after_ok") is not False
+                    for r in rows) else 1
 
 
 if __name__ == "__main__":
