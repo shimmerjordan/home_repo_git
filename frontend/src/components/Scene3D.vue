@@ -1,5 +1,5 @@
 <script setup>
-import { ref, computed, watch, onMounted, onBeforeUnmount, shallowRef } from 'vue'
+import { ref, computed, watch, onMounted, onBeforeUnmount, onActivated, onDeactivated, shallowRef } from 'vue'
 import * as THREE from 'three'
 import { OrbitControls } from 'three/examples/jsm/controls/OrbitControls.js'
 import { TransformControls } from 'three/examples/jsm/controls/TransformControls.js'
@@ -61,9 +61,32 @@ const container = ref(null)
 const tooltip = ref({ visible: false, x: 0, y: 0, text: '' })
 const transformMode = ref('translate')
 
-let scene, camera, renderer, controls, transformControls
+let scene, camera, renderer, controls, transformControls, sun = null, floor = null
 let raf = 0
 let resizeObserver = null
+// ---- 按需渲染 ------------------------------------------------------------------
+// 以前 loop() 常驻 RAF, 首页预览 + 3D 页两个场景各 60fps 空转。现在只在"活跃窗口"内
+// 渲染: 交互 / 相机 tween / 高亮脉冲 / 数据重建 都会 wake(), 最后一次活跃 1.5s 后停帧。
+// 三个门禁任一关闭就停帧且 wake() 无效: 页面隐藏、容器不在视口、组件被 keep-alive 换出。
+const IDLE_AFTER_MS = 1500
+let activeUntil = 0
+let pageVisible = typeof document === 'undefined' ? true : !document.hidden
+let inView = true
+let activated = true
+let io = null
+
+function canRender() { return !!renderer && pageVisible && inView && activated }
+
+function wake(ms = IDLE_AFTER_MS) {
+  activeUntil = Math.max(activeUntil, performance.now() + ms)
+  if (!raf && canRender()) raf = requestAnimationFrame(loop)
+}
+
+function stopLoop() {
+  if (raf) cancelAnimationFrame(raf)
+  raf = 0
+  lastFrameT = 0
+}
 
 const locMeshes = shallowRef(new Map())
 const itemMeshes = shallowRef(new Map())
@@ -208,6 +231,8 @@ function init() {
   controls = new OrbitControls(camera, renderer.domElement)
   controls.enableDamping = true
   controls.target.set(0, 1, 0)
+  controls.addEventListener('start', () => wake())
+  controls.addEventListener('change', () => wake())
 
   // Ambient + sky/ground hemisphere for soft fill.
   scene.add(new THREE.AmbientLight(0xffffff, 0.30))
@@ -215,26 +240,24 @@ function init() {
   hemi.position.set(0, 30, 0)
   scene.add(hemi)
   // Sun: directional light. Shadows only in high-quality mode (very expensive on iPad).
-  const sun = new THREE.DirectionalLight(0xffeed5, props.lowQuality ? 1.0 : 0.9)
+  sun = new THREE.DirectionalLight(0xffeed5, props.lowQuality ? 1.0 : 0.9)
   sun.position.set(18, 28, 14)
-  if (!props.lowQuality) {
-    sun.castShadow = true
-    sun.shadow.mapSize.set(1024, 1024)
-    sun.shadow.camera.near = 1
-    sun.shadow.camera.far = 80
-    sun.shadow.camera.left = -25
-    sun.shadow.camera.right = 25
-    sun.shadow.camera.top = 25
-    sun.shadow.camera.bottom = -25
-    sun.shadow.bias = -0.0005
-  }
+  sun.castShadow = !props.lowQuality
+  sun.shadow.mapSize.set(1024, 1024)
+  sun.shadow.camera.near = 1
+  sun.shadow.camera.far = 80
+  sun.shadow.camera.left = -25
+  sun.shadow.camera.right = 25
+  sun.shadow.camera.top = 25
+  sun.shadow.camera.bottom = -25
+  sun.shadow.bias = -0.0005
   scene.add(sun)
 
   // Floor plane (catches shadows, gives a "ground" feel).
   const floorMat = new THREE.MeshStandardMaterial({
     color: 0x2c3a52, roughness: 0.95, metalness: 0,
   })
-  const floor = new THREE.Mesh(new THREE.PlaneGeometry(80, 80), floorMat)
+  floor = new THREE.Mesh(new THREE.PlaneGeometry(80, 80), floorMat)
   floor.rotation.x = -Math.PI / 2
   floor.position.y = -0.02
   floor.receiveShadow = !props.lowQuality
@@ -267,6 +290,7 @@ function init() {
       controls.enabled = !ev.value
       if (!ev.value) commitTransform()
     })
+    transformControls.addEventListener('change', () => wake())
   }
 
   // Pointer events on the canvas (for tooltip + click selection).
@@ -282,9 +306,16 @@ function init() {
       renderer.setSize(ww, hh)
       camera.aspect = ww / hh
       camera.updateProjectionMatrix()
+      wake()
     }
   })
   resizeObserver.observe(container.value)
+
+  io = new IntersectionObserver(([entry]) => {
+    inView = !!entry?.isIntersecting
+    if (inView) wake(); else stopLoop()
+  }, { threshold: 0 })
+  io.observe(container.value)
 }
 
 // Map each location to its first 'home' ancestor (or null if none).
@@ -530,6 +561,7 @@ function rebuild() {
 
   fitAll(false)
   applySelection()
+  wake()
 }
 
 function fitAll(animate = true) {
@@ -548,18 +580,23 @@ function fitAll(animate = true) {
 }
 
 function loop() {
-  raf = requestAnimationFrame(loop)
+  raf = 0
+  if (!canRender()) { lastFrameT = 0; return }
   const now = performance.now()
   const dt = lastFrameT ? Math.min(0.05, (now - lastFrameT) / 1000) : 0.016
   lastFrameT = now
-  controls.update()
+  // OrbitControls.update() 在阻尼未停时返回 true —— 松手后惯性滑行期间持续续期。
+  if (controls.update()) activeUntil = Math.max(activeUntil, now + IDLE_AFTER_MS)
   if (moteState) updateMotes(dt, now / 1000)
   if (pulseTween) pulseTween()
   renderer.render(scene, camera)
+  if (now < activeUntil) raf = requestAnimationFrame(loop)
+  else lastFrameT = 0
 }
 
 let cameraAnim = null
 function tweenCamera(camPos, target, duration = 800) {
+  wake(duration + 200)
   const startCam = camera.position.clone()
   const startTgt = controls.target.clone()
   const endCam = new THREE.Vector3(camPos.x, camPos.y, camPos.z)
@@ -679,6 +716,7 @@ function occludeForMultiHighlight(targetItemIds) {
   setTimeout(() => {
     if (occlusionRestore) { occlusionRestore(); occlusionRestore = null }
   }, 5000)
+  wake()
 }
 
 async function focusItem(itemId) {
@@ -758,6 +796,7 @@ function pulseHighlight(mesh) {
   const orig = mesh.material.color.getHex()
   const startTime = performance.now()
   const DURATION = 3000
+  wake(DURATION + 200)
   const orig2 = pulseTween
   pulseTween = () => {
     orig2?.()
@@ -823,6 +862,7 @@ function updateRoomLights() {
     v.roomLight.intensity = on ? 1.6 : 0.0
     if (v.roomLamp) v.roomLamp.material.color.setHex(on ? 0xffe8b0 : 0x4a4a4a)
   }
+  wake()
 }
 
 // Show / hide item cubes based on the parent's room being in
@@ -841,6 +881,7 @@ function updateItemVisibility() {
     const room = ancestorRoomOf(it.location_id)
     slot.mesh.visible = room != null && shownRooms.has(room)
   }
+  wake()
 }
 
 function applySelection() {
@@ -863,6 +904,7 @@ function applySelection() {
     }
   }
   updateRoomLights()
+  wake()
 }
 
 function commitTransform() {
@@ -1024,46 +1066,74 @@ function nameOfLoc(id) {
   return l ? l.name : '?'
 }
 
-onMounted(() => { init(); rebuild(); loop() })
+function onVisibility() {
+  pageVisible = !document.hidden
+  if (pageVisible) wake(); else stopLoop()
+}
+onMounted(() => {
+  document.addEventListener('visibilitychange', onVisibility)
+  init(); rebuild(); wake()
+})
+onActivated(() => { activated = true; wake() })
+onDeactivated(() => { activated = false; stopLoop() })
+
+function disposeAll() {
+  stopLoop()
+  io?.disconnect(); io = null
+  resizeObserver?.disconnect(); resizeObserver = null
+  controls?.dispose()
+  transformControls?.dispose?.()
+  disposeExtras()
+  if (renderer) { renderer.dispose(); renderer.domElement.remove() }
+}
 onBeforeUnmount(() => {
-  cancelAnimationFrame(raf)
-  resizeObserver?.disconnect()
-  controls?.dispose()
-  transformControls?.dispose?.()
-  disposeExtras()
-  if (renderer) { renderer.dispose(); renderer.domElement.remove() }
+  document.removeEventListener('visibilitychange', onVisibility)
+  disposeAll()
 })
 
-// Rebuilding the renderer is the cleanest way to honour a runtime lowQuality flip
-// (shadow map state, perRoom lights and pixel ratio are all set up in init()).
-watch(() => props.lowQuality, () => {
-  cancelAnimationFrame(raf)
-  resizeObserver?.disconnect()
-  controls?.dispose()
-  transformControls?.dispose?.()
-  disposeExtras()
-  if (renderer) { renderer.dispose(); renderer.domElement.remove() }
-  // Reset module-locals so re-init starts cleanly.
-  scene = camera = renderer = controls = transformControls = null
-  locMeshes.value = new Map()
-  itemMeshes.value = new Map()
-  init()
+// 省电/全光照切换: 原地调 renderer / 灯 / 尘粒, 再 rebuild() 让每个房间的吸顶灯与
+// 网格阴影标志按新模式重建。以前是销毁并重建整个 WebGL 上下文, 切一次卡半秒。
+// antialias 是 WebGLRenderer 构造期参数改不了 —— 沿用初始化时的值, 可接受。
+function applyQuality() {
+  if (!renderer) return
+  const lq = props.lowQuality
+  renderer.shadowMap.enabled = !lq
+  renderer.setPixelRatio(Math.min(lq ? 1.5 : 2, window.devicePixelRatio || 1))
+  sun.intensity = lq ? 1.0 : 0.9
+  sun.castShadow = !lq
+  floor.receiveShadow = !lq
+  floor.material.needsUpdate = true
+  if (motes) { scene.remove(motes); moteState.geo.dispose(); moteState.mat.dispose(); motes = null; moteState = null }
+  if (!prefersReducedMotion) {
+    moteState = buildMotes(lq ? 200 : 460)
+    motes = moteState.points
+    scene.add(motes)
+  }
   rebuild()
-  loop()
-})
+}
+watch(() => props.lowQuality, applyQuality)
 
-watch(() => [props.locations, props.items], rebuild, { deep: true })
+// 用指纹字符串代替 deep watch: 1000 条物品的递归深比较每次 props 变化都要跑, 而且
+// 引用变了内容没变 (刷新拿回同样的数据) 也会触发整场重建。指纹只含 3D 用到的字段。
+const itemsFp = computed(() => (props.items || [])
+  .map((i) => `${i.id}:${i.name}:${i.quantity}:${i.location_id}:${i.pos_x ?? ''}:${i.pos_z ?? ''}`)
+  .join('|'))
+const locsFp = computed(() => (props.locations || [])
+  .map((l) => `${l.id}:${l.parent_id}:${l.kind}:${l.name}:${JSON.stringify(l.geometry ?? null)}`)
+  .join('|'))
+watch([itemsFp, locsFp], rebuild)
 watch(() => props.highlightItemId, (v) => {
   if (v) focusItems([v])
   updateRoomLights(); updateItemVisibility()
 })
-watch(() => props.highlightItemIds, (v) => {
+watch(() => (props.highlightItemIds || []).join(','), () => {
+  const v = props.highlightItemIds
   if (Array.isArray(v) && v.length) focusItems(v)
   updateRoomLights(); updateItemVisibility()
-}, { deep: true })
+})
 watch(() => props.highlightLocationId, (v) => { if (v) focusLocation(v); updateRoomLights() })
 watch(() => props.selectedLocationId, applySelection)
-watch(() => props.showItemsInRoomIds, updateItemVisibility, { deep: true })
+watch(() => (props.showItemsInRoomIds || []).join(','), updateItemVisibility)
 
 defineExpose({ focusItem, focusItems, focusLocation, fitAll, setTransformMode })
 </script>
