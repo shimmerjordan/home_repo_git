@@ -30,7 +30,6 @@ from ..config import store
 from ..database import get_db
 from ..llm.client import LLMError
 from ..llm.intent import execute_intent, parse_intent
-from ..services.inventory import location_path
 from ..services.logbuffer import app_log
 
 log = logging.getLogger("storage.dingtalk")

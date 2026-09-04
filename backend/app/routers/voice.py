@@ -1,19 +1,15 @@
 import logging
 import time
-from datetime import datetime
-from typing import Any
 
 import httpx
 from fastapi import APIRouter, Depends, File, HTTPException, UploadFile
 from sqlalchemy.orm import Session
 
-from .. import models
 from ..config import store
 from ..database import get_db
 from ..llm.client import LLMError
 from ..llm.intent import apply_operations, execute_intent, parse_intent
 from ..schemas import IntentApply, IntentResult, VoiceQuery
-from ..services.inventory import location_path
 from ..services.logbuffer import app_log
 
 log = logging.getLogger("storage.voice")

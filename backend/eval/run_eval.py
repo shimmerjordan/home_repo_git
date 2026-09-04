@@ -88,7 +88,7 @@ def _target_of(op) -> tuple[str, str]:
     return ("skip", "")
 
 
-def _match(exp, op, items_by_id) -> bool:
+def _match(exp, op) -> bool:
     if exp["intent"] != op["intent"]:
         # create_item 与 put_in+新建 在用户看来是同一件事, 视作等价。
         pair = {exp["intent"], op["intent"]}
@@ -127,7 +127,7 @@ def score_case(case, result) -> dict:
     matched = 0
     misses = []
     for exp in exp_ops:
-        hit = next((o for o in pool if _match(exp, o, None)), None)
+        hit = next((o for o in pool if _match(exp, o)), None)
         if hit is not None:
             pool.remove(hit)
             matched += 1

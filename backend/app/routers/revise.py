@@ -18,12 +18,9 @@ from sqlalchemy.orm import Session
 from .. import models
 from ..database import get_db
 from ..services import audit
-from ..services.inventory import location_path, serialize_item
+from ..services.inventory import UNDOABLE_ACTIONS, location_path, serialize_item
 
 router = APIRouter(prefix="/api/revise", tags=["revise"])
-
-# adjust 存不下"操作前的值", 回滚会算错, 直接拒绝。
-UNDOABLE_ACTIONS = {"take_out", "put_in", "consume"}
 
 
 class UndoBody(BaseModel):

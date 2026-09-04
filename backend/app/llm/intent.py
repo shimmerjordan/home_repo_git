@@ -18,7 +18,7 @@ from sqlalchemy.orm import Session
 
 from .. import models
 from ..config import AppConfig
-from ..services.inventory import location_path, search_items, serialize_transaction
+from ..services.inventory import location_path, search_items
 from ..services.logbuffer import app_log
 from ..services.summary import build_summary
 
@@ -915,7 +915,7 @@ def apply_operations(
 
 
 def _execute_batch(
-    db: Session, parsed: dict[str, Any], ops: list[dict[str, Any]],
+    db: Session, ops: list[dict[str, Any]],
     cfg: AppConfig, base: dict[str, Any],
 ) -> dict[str, Any]:
     """Execute a multi-operation utterance ("把手表、铅笔、橡皮放进书桌1") atomically-ish:
@@ -1152,7 +1152,7 @@ def execute_intent(
         # (批量里 put_in 找不到物品会自动新建, 单条却会挂到模糊候选上), 是一整类 bug 的来源。
         return plan_operations(db, text, ops, base)
     if len(ops) >= 2:
-        return _execute_batch(db, parsed, ops, cfg, base)
+        return _execute_batch(db, ops, cfg, base)
     if len(ops) == 1:
         # Model put a single op into the array — fold it into the top-level fields
         # and continue down the normal single-op path.

@@ -279,7 +279,6 @@ class ConfigPatch(BaseModel):
     dingtalk: Optional[DingTalkConfigPatch] = None
     telegram: Optional[TelegramConfigPatch] = None
     feishu: Optional[FeishuConfigPatch] = None
-    webdav: Optional[WebDAVConfigPatch] = None
 
 
 # --- Audit log ---
