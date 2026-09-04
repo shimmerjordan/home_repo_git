@@ -105,6 +105,24 @@ class PlanRiskTest(unittest.TestCase):
         self.assertFalse(high)
 
 
+class FormatPlanTest(unittest.TestCase):
+    def test_format_plan_keeps_find_answers(self):
+        """一句话里混了查询和高风险操作时, 查询答案不能被丢掉 ——
+        find 是只读的, 它算出的答案该直接给出来, 而不是混在待确认清单里。"""
+        from app.services import botfmt
+        plan = {"operations": [
+            {"intent": "find", "item_name": "苹果", "quantity": 1,
+             "speech": "苹果在我家/书房(×3)", "location_options": []},
+            {"intent": "delete_item", "item_name": "螺丝刀", "quantity": 1,
+             "speech": "", "location_options": [], "matched_by": "exact"},
+        ]}
+        out = botfmt.format_plan(plan, "包含删除物品档案")
+        self.assertIn("苹果在我家/书房(×3)", out)
+        # 待确认清单里只应有那条 delete, 且编号从 1 开始
+        self.assertIn("1. 删除档案 螺丝刀 ×1", out)
+        self.assertNotIn("查找 苹果", out)
+
+
 class BotFlowTest(unittest.TestCase):
     """三端共用的处理流程。parse_intent 用假的, 不联网。"""
 
@@ -119,6 +137,12 @@ class BotFlowTest(unittest.TestCase):
     def _fake_parse(self, ops):
         async def _p(text, db, cfg):
             return {"parsed": {"intent": ops[0]["intent"], "confidence": 0.9,
+                               "speech": "", "operations": ops}}
+        return _p
+
+    def _fake_parse_conf(self, ops, confidence):
+        async def _p(text, db, cfg):
+            return {"parsed": {"intent": ops[0]["intent"], "confidence": confidence,
                                "speech": "", "operations": ops}}
         return _p
 
@@ -237,6 +261,43 @@ class BotFlowTest(unittest.TestCase):
         self.assertIn("书桌1", reply)
         self.assertIn("书桌10", reply)
         self.assertNotIn("回复 确认", reply)
+
+    def test_low_confidence_becomes_pending_not_dead_end(self):
+        """置信度低于阈值时 execute_intent 自己会拦下且不写库, 只回"我不太确定"。
+        botflow 必须把它转成待确认 —— 否则用户回"确认"时 pending 是空的,
+        只能得到"没有待确认的操作", 问了等于没问且再也触发不了。"""
+        import asyncio
+        from app.llm import intent as I
+        from app.services import botflow, pending
+        from _fixtures import make_session, seed, item_by
+        db = make_session(); items = seed(db)[1]
+        luosidao = item_by(items, "螺丝刀")
+        before_qty = luosidao.quantity
+        orig = I.parse_intent
+        # 精确命中 (plan_risk 判低风险) + 低置信度 (execute_intent 的门槛会拦)
+        I.parse_intent = self._fake_parse_conf([
+            {"intent": "take_out", "item_name": "螺丝刀", "quantity": 1,
+             "item_id": None, "location_id": None, "location_name": None,
+             "force_new": False}], 0.2)
+        try:
+            reply = asyncio.run(botflow.handle_bot_message(
+                "tg", "c1", "u1", "拿个螺丝刀", db, self._cfg()))
+        finally:
+            I.parse_intent = orig
+        # 没写库
+        db.refresh(luosidao)
+        self.assertEqual(luosidao.quantity, before_qty)
+        # 但存了待确认, 且回复是可确认的方案
+        self.assertIsNotNone(pending.peek("tg", "c1", "u1"),
+                             "低置信度必须转成待确认, 不能变成死胡同")
+        self.assertIn("回复 确认", reply)
+        # 接着确认一次, 必须真的执行
+        reply2 = asyncio.run(botflow.handle_bot_message(
+            "tg", "c1", "u1", "确认", db, self._cfg()))
+        self.assertIsNone(pending.peek("tg", "c1", "u1"))
+        db.refresh(luosidao)
+        self.assertEqual(before_qty - luosidao.quantity, 1,
+                         "确认之后必须真的扣库存")
 
     def test_unrelated_text_is_new_command_not_confirmation(self):
         """待确认期间说了别的, 应当作新指令重新解析, 旧方案作废。"""

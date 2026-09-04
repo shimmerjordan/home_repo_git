@@ -74,5 +74,15 @@ async def handle_bot_message(
         return botfmt.format_plan(plan, why)
 
     result = I.execute_intent(db, text, parsed, cfg)
+    if result.get("needs_confirmation"):
+        # execute_intent 自己的置信度门槛把它拦下了 —— 没写库, 只回了一句
+        # "我不太确定,你是想…吗"。必须把方案存起来: 否则用户回"确认"时
+        # pending 是空的, 只会得到"没有待确认的操作", 问了等于没问,
+        # 而且这条操作再也没法触发。
+        # (plan_risk 只看匹配质量和操作种类, 不看 LLM 自报的 confidence,
+        #  所以这道门槛是它覆盖不到的另一条路。)
+        plan["_text"] = text
+        pending.put(channel, chat_id, sender_id, plan)
+        return botfmt.format_plan(plan, "AI 对这句话不太确定")
     db.commit()
     return result.get("speech") or "好的。"

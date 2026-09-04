@@ -16,8 +16,19 @@ _VERB = {
 
 def format_plan(plan: dict[str, Any], reason: str) -> str:
     ops = plan.get("operations") or []
-    lines = [f"这次操作需要确认 ({reason}):"]
-    for i, op in enumerate(ops, 1):
+    # 只读的 find 已经算出答案了 (op["speech"], 见 intent.py::_do_find), 它不需要
+    # 确认 —— 先把答案给出来。否则"苹果在哪, 把螺丝刀删了"这种一句话里的查询
+    # 结果会被整个丢掉: 渲染成一行没用的"查找 苹果 ×1", 确认后 _decisions_from_plan
+    # 又把 find 跳过, 答案就再也没了。
+    answers = [o["speech"] for o in ops
+               if o.get("intent") == "find" and o.get("speech")]
+    todo = [o for o in ops if o.get("intent") != "find"]
+    lines: list[str] = []
+    if answers:
+        lines.extend(answers)
+        lines.append("")
+    lines.append(f"这次操作需要确认 ({reason}):")
+    for i, op in enumerate(todo, 1):
         verb = _VERB.get(op.get("intent"), op.get("intent") or "操作")
         name = op.get("item_name") or "?"
         qty = op.get("quantity") or 1
