@@ -20,8 +20,7 @@ import httpx
 
 from ..config import store
 from ..database import SessionLocal
-from ..llm.client import LLMError
-from ..llm.intent import execute_intent, parse_intent
+from ..services import botflow
 from ..services.logbuffer import app_log
 
 log = logging.getLogger("storage.telegram")
@@ -43,38 +42,10 @@ async def _send_message(token: str, chat_id: int, text: str) -> None:
         async with httpx.AsyncClient(timeout=30) as client:
             await client.post(
                 _api_url(token, "sendMessage"),
-                json={"chat_id": chat_id, "text": text[:4000], "parse_mode": "Markdown"},
+                json={"chat_id": chat_id, "text": text[:4000]},
             )
     except Exception as exc:
         log.warning("telegram send failed: %s", exc)
-
-
-def _format_reply(result: dict[str, Any]) -> str:
-    """Plain-text + lightweight Markdown reply suitable for Telegram clients."""
-    lines: list[str] = []
-    if result.get("speech"):
-        lines.append(result["speech"])
-    cands = result.get("candidates") or []
-    recs = result.get("recommendations") or []
-    cm = {c["item_id"]: c for c in cands}
-    if recs:
-        lines.append("")
-        lines.append("*推荐用品:*")
-        for r in recs:
-            c = cm.get(r["item_id"]) or {}
-            name = c.get("item_name", f"#{r['item_id']}")
-            purpose = r.get("purpose") or ""
-            loc = c.get("location_path") or "未指定位置"
-            lines.append(f"• *{name}* — {purpose}  _({loc})_")
-    elif cands:
-        lines.append("")
-        lines.append("*位置:*")
-        for c in cands[:10]:
-            lines.append(f"• *{c['item_name']}* — _{c.get('location_path') or '未指定位置'}_")
-    if result.get("executed"):
-        lines.append("")
-        lines.append("✅ 已记录")
-    return "\n".join(lines).strip() or "（无内容）"
 
 
 async def _handle_update(update: dict[str, Any], cfg) -> None:
@@ -114,27 +85,18 @@ async def _handle_update(update: dict[str, Any], cfg) -> None:
         text = text[space + 1:].strip() if space != -1 else ""
     if not text:
         await _send_message(tg_cfg.bot_token, chat_id,
-                            "怎么帮你? 试试 `充电宝在哪` / `我刚拿了卷尺` / `我发烧了`")
+                            "怎么帮你? 试试 充电宝在哪 / 我刚拿了卷尺 / 我发烧了")
         return
 
     app_log.info("telegram from=%s text=%r", user_id, text[:120])
 
     db = SessionLocal()
     try:
-        try:
-            out = await parse_intent(text, db, cfg)
-        except LLMError as exc:
-            await _send_message(tg_cfg.bot_token, chat_id, f"AI 出错了: {exc}")
-            return
-        parsed = out["parsed"]
-        # Silent execution — DingTalk and Telegram share the policy: no UI to
-        # confirm, so force-execute mutating intents that the LLM picked.
-        if parsed.get("intent") in ("take_out", "put_in", "consume", "create_item") or parsed.get("operations"):
-            parsed["confidence"] = max(parsed.get("confidence", 0.0), 1.0)
-        result = execute_intent(db, text, parsed, cfg)
-        await _send_message(tg_cfg.bot_token, chat_id, _format_reply(result))
+        reply = await botflow.handle_bot_message(
+            "telegram", str(chat_id), str(user_id), text, db, cfg)
     finally:
         db.close()
+    await _send_message(tg_cfg.bot_token, chat_id, reply)
 
 
 async def _polling_loop() -> None:

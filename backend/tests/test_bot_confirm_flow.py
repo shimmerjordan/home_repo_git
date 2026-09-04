@@ -319,6 +319,38 @@ class BotFlowTest(unittest.TestCase):
             I.parse_intent = orig
         self.assertIsNone(pending.peek("tg", "c1", "u1"), "旧方案该被作废")
 
+    def test_find_reply_lists_candidates_not_just_speech(self):
+        """只回 speech 会丢候选/推荐清单 —— assist 问药时整张清单都没了。
+        这条钉住 botflow 走的是 botfmt.format_result 而不是 result["speech"]。"""
+        from app.services import botfmt
+        result = {
+            "speech": "找到 2 个", "executed": False,
+            "candidates": [
+                {"item_id": 1, "item_name": "布洛芬", "location_path": "我家/客厅/药箱"},
+                {"item_id": 2, "item_name": "退热贴", "location_path": "我家/卧室"},
+            ],
+            "recommendations": [],
+        }
+        out = botfmt.format_result(result)
+        self.assertIn("布洛芬", out)
+        self.assertIn("退热贴", out)
+        self.assertIn("我家/客厅/药箱", out)
+        # 纯文本契约: 不许出现 Markdown 标记
+        self.assertNotIn("*", out)
+        self.assertNotIn("_", out)
+
+    def test_assist_reply_keeps_recommendations(self):
+        from app.services import botfmt
+        result = {
+            "speech": "给你几个", "executed": False,
+            "candidates": [{"item_id": 1, "item_name": "布洛芬",
+                            "location_path": "我家/客厅/药箱"}],
+            "recommendations": [{"item_id": 1, "purpose": "退烧"}],
+        }
+        out = botfmt.format_result(result)
+        self.assertIn("布洛芬", out)
+        self.assertIn("退烧", out)
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -48,7 +48,7 @@ async def handle_bot_message(
         result = I.apply_operations(db, plan.get("_text") or "",
                                     _decisions_from_plan(plan), base)
         db.commit()
-        return result.get("speech") or "已执行。"
+        return botfmt.format_result(result)
 
     # 说了别的 —— 旧方案作废, 当新指令处理。
     pending.drop(channel, chat_id, sender_id)
@@ -85,4 +85,4 @@ async def handle_bot_message(
         pending.put(channel, chat_id, sender_id, plan)
         return botfmt.format_plan(plan, "AI 对这句话不太确定")
     db.commit()
-    return result.get("speech") or "好的。"
+    return botfmt.format_result(result)

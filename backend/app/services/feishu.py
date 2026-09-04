@@ -41,8 +41,7 @@ from typing import Any
 
 from ..config import store
 from ..database import SessionLocal
-from ..llm.client import LLMError
-from ..llm.intent import execute_intent, parse_intent
+from ..services import botflow
 from ..services.logbuffer import app_log
 
 log = logging.getLogger("storage.feishu")
@@ -148,14 +147,6 @@ def _try_import():
         return True
     except ImportError:
         return False
-
-
-def _format_reply(result: dict[str, Any]) -> str:
-    """Same Markdown shape as Telegram. Feishu's text msg_type renders plain text
-    but accepts \\n line breaks; rich tables would need the 'post' or 'interactive'
-    msg_types — left as a TODO if you want fancier cards."""
-    from . import telegram as _tg
-    return _tg._format_reply(result)
 
 
 # ---- 日志止血 --------------------------------------------------------------
@@ -266,23 +257,6 @@ def _send_text(receive_id: str, receive_id_type: str, text: str) -> None:
 
 # ---- Async pipeline (runs on the FastAPI loop) -----------------------------
 
-async def _run_intent(text: str, cfg) -> str:
-    db = SessionLocal()
-    try:
-        try:
-            out = await parse_intent(text, db, cfg)
-        except LLMError as exc:
-            return f"AI 出错了: {exc}"
-        parsed = out["parsed"]
-        # Silent execution — same policy as DingTalk/Telegram bots.
-        if parsed.get("intent") in ("take_out", "put_in", "consume", "create_item") or parsed.get("operations"):
-            parsed["confidence"] = max(parsed.get("confidence", 0.0), 1.0)
-        result = execute_intent(db, text, parsed, cfg)
-        return _format_reply(result)
-    finally:
-        db.close()
-
-
 # ---- Event handler (runs on lark's thread) ---------------------------------
 
 def _handle_message_event(data) -> None:
@@ -351,16 +325,21 @@ def _handle_message_event(data) -> None:
 
         # FIRE-AND-FORGET: schedule the LLM + reply work on the main loop and
         # return so the WS thread can keep the heartbeat going.
-        asyncio.run_coroutine_threadsafe(_handle_async(text, chat_id, cfg), _main_loop)
+        asyncio.run_coroutine_threadsafe(_handle_async(text, chat_id, sender_id, cfg), _main_loop)
     except Exception as exc:
         log.exception("feishu handle: %s", exc)
 
 
-async def _handle_async(text: str, chat_id: str, cfg) -> None:
+async def _handle_async(text: str, chat_id: str, sender_id: str, cfg) -> None:
     """Runs on the FastAPI main loop. Does the LLM call, then sends the reply
     via the lark SDK in an executor thread (the SDK is sync)."""
     try:
-        reply = await _run_intent(text, cfg)
+        db = SessionLocal()
+        try:
+            reply = await botflow.handle_bot_message(
+                "feishu", chat_id, sender_id, text, db, cfg)
+        finally:
+            db.close()
     except Exception as exc:
         log.exception("feishu intent: %s", exc)
         reply = f"AI 出错了: {exc}"

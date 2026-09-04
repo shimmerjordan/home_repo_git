@@ -67,3 +67,38 @@ def format_location_ambiguity(plan: dict[str, Any]) -> str | None:
         lines.append(f"{i}. {name} → 「{asked}」可能是: {opts}")
     lines.append("说清楚是哪一个, 再说一次。")
     return "\n".join(lines)
+
+
+def format_result(result: dict[str, Any]) -> str:
+    """把一次执行结果渲染成群消息纯文本。
+
+    从 telegram.py::_format_reply 移植过来的 —— 以前三端各有一份渲染
+    (telegram 一份、feishu 一个转调它的壳、dingtalk 另写一份 markdown 表格),
+    现在收成这一份。去掉了 Markdown 标记: 飞书的 text 消息不解析它, 星号会
+    原样显示; 而带 parse_mode 的 Telegram 遇到物品名里的下划线会直接 400
+    (用户一条回复都收不到)。
+    """
+    lines: list[str] = []
+    if result.get("speech"):
+        lines.append(result["speech"])
+    cands = result.get("candidates") or []
+    recs = result.get("recommendations") or []
+    cm = {c["item_id"]: c for c in cands}
+    if recs:
+        lines.append("")
+        lines.append("推荐用品:")
+        for r in recs:
+            c = cm.get(r["item_id"]) or {}
+            name = c.get("item_name", f"#{r['item_id']}")
+            purpose = r.get("purpose") or ""
+            loc = c.get("location_path") or "未指定位置"
+            lines.append(f"· {name} — {purpose} ({loc})")
+    elif cands:
+        lines.append("")
+        lines.append("位置:")
+        for c in cands[:10]:
+            lines.append(f"· {c['item_name']} — {c.get('location_path') or '未指定位置'}")
+    if result.get("executed"):
+        lines.append("")
+        lines.append("✅ 已记录")
+    return "\n".join(lines).strip() or "（无内容）"

@@ -21,15 +21,13 @@ import hmac
 import logging
 import time
 import urllib.parse
-from typing import Any
 
 from fastapi import APIRouter, Depends, HTTPException, Request
 from sqlalchemy.orm import Session
 
 from ..config import store
 from ..database import get_db
-from ..llm.client import LLMError
-from ..llm.intent import execute_intent, parse_intent
+from ..services import botflow
 from ..services.logbuffer import app_log
 
 log = logging.getLogger("storage.dingtalk")
@@ -57,41 +55,6 @@ def _verify_signature(timestamp: str, sign: str, secret: str) -> bool:
     digest = hmac.new(secret.encode("utf-8"), msg, hashlib.sha256).digest()
     expected = urllib.parse.quote_plus(base64.b64encode(digest).decode("utf-8"))
     return hmac.compare_digest(expected, sign)
-
-
-def _format_markdown_response(result: dict[str, Any]) -> dict[str, Any]:
-    """Render an IntentResult as a DingTalk markdown message. Markdown is the
-    only DingTalk message type that renders tables nicely in mobile + desktop."""
-    title = f"{result.get('intent', '结果')} · 置信度 {int((result.get('confidence', 0)) * 100)}%"
-    lines: list[str] = []
-    if result.get("speech"):
-        lines.append(f"**{result['speech']}**\n")
-
-    recs = result.get("recommendations") or []
-    cands = result.get("candidates") or []
-    by_id_cand = {c["item_id"]: c for c in cands}
-
-    if recs:
-        lines.append("| 物品 | 用途 | 位置 |")
-        lines.append("| --- | --- | --- |")
-        for r in recs:
-            c = by_id_cand.get(r["item_id"]) or {}
-            lines.append(f"| {c.get('item_name', '#' + str(r['item_id']))} | "
-                         f"{r.get('purpose', '')} | {c.get('location_path') or '—'} |")
-    elif cands:
-        lines.append("| 物品 | 位置 |")
-        lines.append("| --- | --- |")
-        for c in cands[:20]:
-            lines.append(f"| {c.get('item_name')} | {c.get('location_path') or '—'} |")
-
-    if result.get("executed"):
-        lines.append("\n✅ 已执行")
-
-    md = "\n".join(lines) if lines else (result.get("speech") or "（无内容）")
-    return {
-        "msgtype": "markdown",
-        "markdown": {"title": title[:80], "text": md},
-    }
 
 
 @router.post("/webhook")
@@ -145,22 +108,19 @@ async def webhook(request: Request, db: Session = Depends(get_db)):
 
     app_log.info("dingtalk.webhook from=%s text=%r", sender, text[:120])
 
+    conversation_id = str(payload.get("conversationId") or "")
     try:
-        out = await parse_intent(text, db, cfg)
-    except LLMError as exc:
-        app_log.error("dingtalk: LLM error: %s", exc)
-        return {"msgtype": "text", "text": {"content": f"AI 出错了: {exc}"}}
-
-    parsed = out["parsed"]
-    # SILENT EXECUTION: force confidence high so execute_intent doesn't park
-    # mutating actions behind "needs_confirmation". The user explicitly asked
-    # for no-confirmation flow on DingTalk.
-    if parsed.get("intent") in ("take_out", "put_in", "consume", "create_item") or parsed.get("operations"):
-        parsed["confidence"] = max(parsed.get("confidence", 0.0), 1.0)
-    result = execute_intent(db, text, parsed, cfg)
-    app_log.info("dingtalk.done intent=%s exec=%s tx=%s",
-                 result.get("intent"), result.get("executed"), result.get("transaction_id"))
-    return _format_markdown_response(result)
+        reply_text = await botflow.handle_bot_message(
+            "dingtalk", conversation_id, str(sender or ""), text, db, cfg)
+    except Exception as exc:
+        # 钉钉这条是 FastAPI 路由 —— 异常抛出去就是 500, 群里一个字都收不到,
+        # 用户只会觉得机器人死了。飞书的 _handle_async 和 Telegram 的
+        # _polling_loop 各自有兜底 except, 只有这条没有。
+        log.exception("dingtalk botflow: %s", exc)
+        return {"msgtype": "text", "text": {"content": f"出错了: {exc}"}}
+    app_log.info("dingtalk.done chat=%s len=%s", conversation_id, len(reply_text))
+    return {"msgtype": "markdown",
+            "markdown": {"title": "仓储管家", "text": reply_text}}
 
 
 @router.post("/test")
