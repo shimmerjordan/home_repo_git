@@ -20,8 +20,10 @@ _STORE: dict[tuple[str, str, str], dict[str, Any]] = {}
 
 # 只认明确的确认/取消词。认不出就当作新的一句话去解析 —— 把"再拿个螺丝刀"
 # 误判成确认, 比不认识它糟糕得多。
-_YES = re.compile(r"^\s*(确认|确定|确认执行|执行|是的?|对|好的?|嗯|ok|OK|yes|y)\s*[!!。.]*\s*$")
-_NO = re.compile(r"^\s*(取消|不要|不用|算了|不对|否|no|n)\s*[!!。.]*\s*$")
+_YES = re.compile(r"^\s*(确认|确定|确认执行|执行|是的?|对|好的?|嗯|ok|yes|y)\s*[!!。.]*\s*$",
+                  re.IGNORECASE)
+_NO = re.compile(r"^\s*(取消|不要|不用|算了|不对|否|no|n)\s*[!!。.]*\s*$",
+                 re.IGNORECASE)
 
 
 def _key(channel: str, chat_id: str, sender_id: str) -> tuple[str, str, str]:
