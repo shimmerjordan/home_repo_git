@@ -88,6 +88,55 @@ class ApplySkipLocationAmbiguityTest(unittest.TestCase):
         self.assertIn("跳过", op["speech"])
         self.assertNotIn("不明确", op["speech"])
 
+    def test_ambiguous_decision_fills_location_options(self):
+        """走真正的歧义分支 (不是 skip): location_options 必须把候选序列化出来 ——
+        前端靠它渲染候选让用户挑, T5 的 plan_risk 也要读这个字段判高风险。"""
+        db = make_session()
+        by_path, items = seed(db)
+        db.add(models.Location(name="书桌10", kind="box",
+                               parent_id=by_path["我家/书房"].id))
+        db.flush()
+        juanchi = item_by(items, "卷尺")
+        base = {"operations": [], "speech": ""}
+        r = I.apply_operations(db, "把卷尺放进书桌", [
+            {"intent": "put_in", "option_key": f"i:{juanchi.id}",
+             "location_name": "书桌", "quantity": 1}], base)
+        op = r["operations"][0]
+        self.assertTrue(op["pending"])
+        self.assertEqual(len(op["location_options"]), 2)
+        for o in op["location_options"]:
+            self.assertIn("location_id", o)
+            self.assertIn("name", o)
+            self.assertIn("path", o)
+
+
+class ExecuteBatchLocationAmbiguityTest(unittest.TestCase):
+    def test_execute_batch_fills_location_options(self):
+        """T4 修复 2: _execute_batch 的歧义分支以前只设 pending/matched_by/speech,
+        location_options 停在初始化的 [] —— 和 plan_operations/apply_operations 不对称。"""
+        db = make_session()
+        by_path, items = seed(db)
+        db.add(models.Location(name="书桌10", kind="box",
+                               parent_id=by_path["我家/书房"].id))
+        db.flush()
+        ops = [
+            {"intent": "take_out", "item_name": "卷尺", "location_name": "书桌",
+             "quantity": 1, "item_id": None, "location_id": None, "force_new": False},
+            {"intent": "take_out", "item_name": "螺丝", "quantity": 1,
+             "item_id": None, "location_id": None, "force_new": False},
+        ]
+        base = {"operations": [], "speech": "", "confidence": 1.0}
+        r = I._execute_batch(db, ops, AppConfig(), base)
+        op = r["operations"][0]
+        self.assertTrue(op["pending"])
+        self.assertEqual(len(op["location_options"]), 2)
+        names = sorted(o["name"] for o in op["location_options"])
+        self.assertEqual(names, ["书桌1", "书桌10"])
+        for o in op["location_options"]:
+            self.assertIn("location_id", o)
+            self.assertIn("name", o)
+            self.assertIn("path", o)
+
 
 class DirectPathLocationAmbiguityTest(unittest.TestCase):
     """单条直连路径 (plan_only=False, 群机器人/关掉二次确认的语音走的那条) 以前遇到

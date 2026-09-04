@@ -1039,6 +1039,10 @@ def _execute_batch(
                 r["pending"] = True
                 r["matched_by"] = "none"
                 r["speech"] = f"位置「{op.get('location_name')}」不明确, 没执行"
+                r["location_options"] = [
+                    {"location_id": l.id, "name": l.name, "path": location_path(l)}
+                    for l in loc_ambig
+                ]
             elif not item:
                 name = (op.get("item_name") or "").strip()
                 if intent == "put_in" and name:

@@ -158,6 +158,49 @@ class ApiPlanApplyTest(unittest.TestCase):
                 self.assertIn("message", r.json())
         self._run(go())
 
+    def test_consume_action_decrements_quantity(self):
+        """T4 修复 1: 收敛到 apply_quantity_delta 之前, record_transaction 的
+        take_out/put_in/adjust 三个 if/elif 都不认 consume, 会插入一条流水但
+        item.quantity 一点不变 —— 静默失效。收敛后 consume 和 take_out 一视同仁,
+        这里钉住: 真的扣了库存, 且会 clamp 到 0 而不是负数。"""
+        async def go():
+            async with self._client() as c:
+                # include_depleted=true: 前面的测试可能已经把卷尺取到 0,
+                # 而 /api/items 默认隐藏库存为 0 的记录。
+                items = (await c.get("/api/items?q=卷尺&include_depleted=true")).json()
+                tape = next(i for i in items if i["name"] == "卷尺")
+                before_qty = tape["quantity"]
+
+                consume_qty = 1
+                r = await c.post(f"/api/items/{tape['id']}/transactions", json={
+                    "item_id": tape["id"], "action": "consume", "quantity": consume_qty,
+                    "location_id": tape["location_id"], "note": "测试-consume"})
+                self.assertEqual(r.status_code, 200, r.text)
+
+                items = (await c.get("/api/items?q=卷尺&include_depleted=true")).json()
+                tape = next(i for i in items if i["name"] == "卷尺")
+                self.assertEqual(before_qty - tape["quantity"], consume_qty,
+                                 "consume 必须真的扣库存, 不能只是插一条流水")
+
+                # 顺带覆盖 clamp: 消耗量大于剩余库存, 结果必须是 0 而不是负数。
+                over_qty = tape["quantity"] + 5
+                r2 = await c.post(f"/api/items/{tape['id']}/transactions", json={
+                    "item_id": tape["id"], "action": "consume", "quantity": over_qty,
+                    "location_id": tape["location_id"], "note": "测试-超量consume"})
+                self.assertEqual(r2.status_code, 200, r2.text)
+                items = (await c.get("/api/items?q=卷尺&include_depleted=true")).json()
+                tape = next(i for i in items if i["name"] == "卷尺")
+                self.assertEqual(tape["quantity"], 0)
+
+                # 复原: 这个类里的测试共用同一个 sqlite 文件, 后面
+                # test_plan_only_ignored_when_setting_off 靠默认搜索 (不传
+                # include_depleted) 找卷尺, 不能让它被这条测试永久清空。
+                r3 = await c.post(f"/api/items/{tape['id']}/transactions", json={
+                    "item_id": tape["id"], "action": "put_in", "quantity": before_qty,
+                    "location_id": tape["location_id"], "note": "测试-复原"})
+                self.assertEqual(r3.status_code, 200, r3.text)
+        self._run(go())
+
     def test_plan_only_ignored_when_setting_off(self):
         """confirm_before_apply 关掉时, 即使前端传 plan_only 也直接执行 —— 开关的
         最终裁决权在服务端。"""
