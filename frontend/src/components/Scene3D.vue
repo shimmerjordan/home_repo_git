@@ -74,6 +74,12 @@ let pageVisible = typeof document === 'undefined' ? true : !document.hidden
 let inView = true
 let activated = true
 let io = null
+// disposeAll() 强制 resolve 掉挂起的 tweenCamera() Promise 时, 等待它的 async 函数
+// (focusItems/focusLocation) 的续体是微任务, 要等 disposeAll() 的同步代码跑完(scene/
+// camera 已置空, locMeshes/itemMeshes 已被 clearObjects() 清空)才会恢复执行 —— 卸载
+// 撞上一次进行中的相机 tween 时, 续体里再访问这些引用会抛 TypeError。disposed 在
+// disposeAll() 一开始就置真, 每个 await tweenCamera(...) 之后检查它, 已销毁就直接退出。
+let disposed = false
 
 function canRender() { return !!renderer && pageVisible && inView && activated }
 
@@ -758,6 +764,7 @@ async function focusItems(itemIds) {
   if (!withCubes.length) {
     const item = (props.items || []).find((i) => i.id === ids[0])
     if (item?.location_id) await focusLocation(item.location_id)
+    if (disposed) return // 卸载撞上了这次 tween 的强制 resolve —— scene/camera 已经没了
     occludeForMultiHighlight(ids)
     return
   }
@@ -779,6 +786,8 @@ async function focusItems(itemIds) {
         await tweenCamera(
           { x: info.world.x + dist * 0.6, y: info.world.y + dist * 0.8, z: info.world.z + dist * 0.9 },
           { x: info.world.x, y: info.world.y, z: info.world.z }, 900)
+        // 循环体内, 每次 await 之后都要查 —— 卸载可能恰好发生在中间某一段 tween 里。
+        if (disposed) return
       }
     }
   }
@@ -798,9 +807,15 @@ async function focusItems(itemIds) {
   await tweenCamera(
     { x: center.x + dist * 0.55, y: center.y + dist * 0.75, z: center.z + dist * 0.85 },
     { x: center.x, y: center.y, z: center.z }, 800)
+  if (disposed) return
 
   occludeForMultiHighlight(withCubes)
-  for (const id of withCubes) pulseHighlight(itemMeshes.value.get(id).mesh)
+  for (const id of withCubes) {
+    // 纵深防御: itemMeshes 在这次 await 期间可能因为数据变化 (rebuild) 或卸载 (clearObjects)
+    // 被整个换掉/清空, id 不一定还在里面。
+    const slot = itemMeshes.value.get(id)
+    if (slot) pulseHighlight(slot.mesh)
+  }
 }
 
 async function focusLocation(locId) {
@@ -810,6 +825,9 @@ async function focusLocation(locId) {
   await tweenCamera(
     { x: info.world.x + dim * 1.0, y: info.world.y + dim * 1.2, z: info.world.z + dim * 1.3 },
     { x: info.world.x, y: info.world.y, z: info.world.z }, 700)
+  // 目前函数到这里就结束了, 加这行是防御性的: focusLocation 也被 focusItems 的 fallback
+  // 分支直接 await —— 万一以后这里加了新代码, 不会漏掉卸载检查。
+  if (disposed) return
 }
 
 function pulseHighlight(mesh) {
@@ -1099,6 +1117,10 @@ onDeactivated(() => { activated = false; stopLoop() })
 
 function disposeAll() {
   stopLoop()
+  // 先置真: resolve 掉挂起的 tweenCamera() Promise 后, focusItems/focusLocation 里 await
+  // 之后的续体要等这个函数剩余的同步代码跑完才会作为微任务执行, 那时 scene/camera 已经是
+  // null 了 —— disposed 必须在此刻就是 true, 那些续体里的 `if (disposed) return` 才拦得住。
+  disposed = true
   // tweenCamera() 的 Promise 只能被 loop() 驱动的 cameraAnim 链 resolve; 若卸载发生在一次
   // tween 进行中, RAF 已停, 没人再来推进它, Promise 会永久 pending, 闭包 (camera/controls
   // 的引用) 也跟着泄漏。这里直接 resolve 掉, 让等待它的 await 链正常走完。
