@@ -3,6 +3,7 @@ import { ref, watch, onMounted, computed } from 'vue'
 import { api } from '../api'
 import ItemEditor from './ItemEditor.vue'
 import LocationTree from './LocationTree.vue'
+import { useInventoryStore } from '../composables/useInventoryStore'
 
 const props = defineProps({ refreshKey: Number })
 const emit = defineEmits(['changed'])
@@ -18,16 +19,23 @@ const importBusy = ref(false)
 const importMsg = ref('')
 const fileInput = ref(null)
 
+const store = useInventoryStore()
 async function load() {
   // Items tab is the canonical management view — show depleted (quantity=0)
   // rows too so users can edit/restore them here. Search and voice paths
   // exclude depleted by default.
-  const [is_, locs] = await Promise.all([
-    api.listItems({ q: q.value || undefined, limit: 1000, include_depleted: true }),
-    api.listLocations(),
-  ])
-  items.value = is_
-  locations.value = locs
+  if (q.value) {
+    const [is_, locs] = await Promise.all([
+      api.listItems({ q: q.value, limit: 1000, include_depleted: true }),
+      store.loadLocations(),
+    ])
+    items.value = is_
+    locations.value = locs
+  } else {
+    const [locs, all] = await store.loadAll()
+    items.value = all
+    locations.value = locs
+  }
 }
 
 onMounted(load)

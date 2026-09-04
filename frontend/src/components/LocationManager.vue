@@ -5,6 +5,7 @@ import { ref, computed, onMounted, watch } from 'vue'
 import { api } from '../api'
 import { effectiveGeometry } from '../composables/sceneLayout'
 import LevelSlotFields from './LevelSlotFields.vue'
+import { useInventoryStore } from '../composables/useInventoryStore'
 
 const props = defineProps({ refreshKey: Number })
 const emit = defineEmits(['changed'])
@@ -15,10 +16,11 @@ const cwdId = ref(null) // null = root
 const editing = ref(null)              // currently editing location, drives the modal
 const editForm = ref(null)             // editable copy
 
+const store = useInventoryStore()
 async function load() {
-  const [locs, all] = await Promise.all([api.listLocations(), api.listItems({ limit: 1000 })])
+  const [locs, all] = await store.loadAll()
   locations.value = locs
-  items.value = all
+  items.value = store.activeItems.value     // 服务端默认过滤 quantity=0, 这里等价
 }
 onMounted(load)
 watch(() => props.refreshKey, load)

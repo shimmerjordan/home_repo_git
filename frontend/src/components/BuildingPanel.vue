@@ -1,12 +1,12 @@
 <script setup>
 import { ref, computed, onMounted, watch } from 'vue'
-import { api } from '../api'
 import PlanEditor from './PlanEditor.vue'
 import Scene3D from './Scene3D.vue'
 import LocationTreeNode from './LocationTreeNode.vue'
 import LevelSlotFields from './LevelSlotFields.vue'
 import { catalogFor, autoArrange, effectiveGeometry, isLowEndDevice } from '../composables/sceneLayout'
 import { useEditHistory } from '../composables/useEditHistory'
+import { useInventoryStore } from '../composables/useInventoryStore'
 
 const props = defineProps({ refreshKey: Number })
 const emit = defineEmits(['changed'])
@@ -136,10 +136,11 @@ async function renameActiveHome() {
   await applyEdit({ kind: 'update', id: cur.id, patch: { name: name.trim() }, before: history.snapshot(cur) })
 }
 
+const store = useInventoryStore()
 async function load() {
-  const [locs, its] = await Promise.all([api.listLocations(), api.listItems({ limit: 1000 })])
-  locations.value = locs
-  items.value = its
+  const [locs, its] = await store.loadAll()
+  locations.value = locs.slice()            // 本地可编辑副本: applyEdit / history 直接改这个数组
+  items.value = store.activeItems.value
 }
 onMounted(load)
 watch(() => props.refreshKey, load)

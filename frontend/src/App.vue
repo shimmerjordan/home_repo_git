@@ -9,6 +9,9 @@ import LogsPanel from './components/LogsPanel.vue'
 import BackupPanel from './components/BackupPanel.vue'
 import AuditPanel from './components/AuditPanel.vue'
 import { api } from './api'
+import { useInventoryStore } from './composables/useInventoryStore'
+
+const store = useInventoryStore()
 
 // The 3D builder drags in three.js + PlanEditor (~600 KB) that no other tab needs. Load it
 // only when the 3D tab is first opened; <keep-alive> then preserves its scene across tab switches.
@@ -50,7 +53,7 @@ async function loadSettings() {
 }
 onMounted(loadSettings)
 
-function bumpRefresh() { refreshKey.value += 1 }
+function bumpRefresh() { store.invalidate(); refreshKey.value += 1 }
 
 // Fullscreen toggle — modern API + iOS webkit fallback. iPad Safari < 16.4 has no
 // real fullscreen, so on those devices we toggle a CSS class to hide the page chrome.

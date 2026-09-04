@@ -8,6 +8,7 @@ import ItemQuickActions from './ItemQuickActions.vue'
 import OperationResults from './OperationResults.vue'
 import PlanReview from './PlanReview.vue'
 import { isLowEndDevice } from '../composables/sceneLayout'
+import { useInventoryStore } from '../composables/useInventoryStore'
 
 // three.js (~600 KB) is only pulled in through Scene3D, and here it renders solely once a
 // saved 3D layout exists. Load it on demand so the default voice view stays light.
@@ -125,14 +126,15 @@ const micMuted = ref(false)
 // Increments on every result; used to trigger scroll-into-view.
 const resultSeq = ref(0)
 
+const store = useInventoryStore()
 async function loadScene() {
   // Storage events don't fire in the same tab — re-read the active home from
   // localStorage on every refresh so changes made in BuildingPanel show up here.
   activeHomeId.value = loadActiveHome()
   try {
-    const [locs, its] = await Promise.all([api.listLocations(), api.listItems({ limit: 1000 })])
+    const [locs] = await store.loadAll()
     sceneLocations.value = locs
-    sceneItems.value = its
+    sceneItems.value = store.activeItems.value
   } catch {}
 }
 
