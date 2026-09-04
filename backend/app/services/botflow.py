@@ -69,6 +69,11 @@ async def handle_bot_message(
 
     high, why = risk.plan_risk(plan.get("operations") or [])
     if high:
+        if not str(sender_id or "").strip():
+            # 认不出是谁在说话 —— 待确认方案的 key 会退化成 (渠道, 会话, ""),
+            # 那样同群里任何人回"确认"都能执行这一条 (包括删档)。宁可不办。
+            return (f"这次操作需要确认 ({why}), 但我认不出是谁在说话, "
+                    f"没法确认身份。请私聊我, 或者把话说得更具体一点。")
         plan["_text"] = text
         pending.put(channel, chat_id, sender_id, plan)
         return botfmt.format_plan(plan, why)

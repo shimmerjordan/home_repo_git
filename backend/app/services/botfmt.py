@@ -83,7 +83,7 @@ def format_result(result: dict[str, Any]) -> str:
         lines.append(result["speech"])
     cands = result.get("candidates") or []
     recs = result.get("recommendations") or []
-    cm = {c["item_id"]: c for c in cands}
+    cm = {c.get("item_id"): c for c in cands}
     if recs:
         lines.append("")
         lines.append("推荐用品:")
@@ -97,7 +97,8 @@ def format_result(result: dict[str, Any]) -> str:
         lines.append("")
         lines.append("位置:")
         for c in cands[:10]:
-            lines.append(f"· {c['item_name']} — {c.get('location_path') or '未指定位置'}")
+            lines.append(f"· {c.get('item_name') or '?'} — "
+                         f"{c.get('location_path') or '未指定位置'}")
     if result.get("executed"):
         lines.append("")
         lines.append("✅ 已记录")

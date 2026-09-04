@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import re
 from typing import Any
 
 import httpx
@@ -83,6 +84,10 @@ async def _handle_update(update: dict[str, Any], cfg) -> None:
     if text.startswith("/"):
         space = text.find(" ")
         text = text[space + 1:].strip() if space != -1 else ""
+    # 群聊 privacy mode 默认开启, 用户唤起机器人的常规做法就是 "@mybot 确认"。
+    # 不剥掉这个前缀, classify_reply 的整句锚定会判成 "other", botflow 会把
+    # 刚存的待确认方案丢掉 —— 用户确认了一次反而要从头再来。
+    text = re.sub(r"^@\w+\s*", "", text).strip()
     if not text:
         await _send_message(tg_cfg.bot_token, chat_id,
                             "怎么帮你? 试试 充电宝在哪 / 我刚拿了卷尺 / 我发烧了")

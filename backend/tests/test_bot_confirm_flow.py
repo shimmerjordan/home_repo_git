@@ -351,6 +351,133 @@ class BotFlowTest(unittest.TestCase):
         self.assertIn("布洛芬", out)
         self.assertIn("退烧", out)
 
+    def test_reply_goes_through_format_result_not_bare_speech(self):
+        """把 botflow 那两处改回 result["speech"] 时这条必须红 ——
+        上一轮的两条测试直接调 format_result, 改回去照样绿, 等于没钉住接线。"""
+        import asyncio
+        from app.llm import intent as I
+        from app.services import botflow
+        from _fixtures import make_session, seed
+        db = make_session(); seed(db)
+        orig = I.parse_intent
+        # "充电" 在夹具里能模糊命中充电宝和充电器两条
+        I.parse_intent = self._fake_parse([
+            {"intent": "find", "item_name": "充电", "quantity": 1,
+             "item_id": None, "location_id": None, "location_name": None,
+             "force_new": False}])
+        try:
+            reply = asyncio.run(botflow.handle_bot_message(
+                "tg", "c1", "u1", "充电的东西在哪", db, self._cfg()))
+        finally:
+            I.parse_intent = orig
+        self.assertIn("充电宝", reply)
+        self.assertIn("充电器", reply)
+
+    def test_high_risk_without_sender_id_refuses(self):
+        """认不出说话人时, 待确认方案的 key 会退化成全群共享, 同群任何人
+        回"确认"都能执行别人挂起的删档。宁可不办, 也不能记到别人头上。"""
+        import asyncio
+        from app.llm import intent as I
+        from app.services import botflow, pending
+        from _fixtures import make_session, seed
+        db = make_session(); seed(db)
+        orig = I.parse_intent
+        I.parse_intent = self._fake_parse([
+            {"intent": "delete_item", "item_name": "螺丝刀", "quantity": 1,
+             "item_id": None, "location_id": None, "location_name": None,
+             "force_new": False}])
+        try:
+            reply = asyncio.run(botflow.handle_bot_message(
+                "tg", "c1", "", "把螺丝刀删了", db, self._cfg()))
+        finally:
+            I.parse_intent = orig
+        self.assertIsNone(pending.peek("tg", "c1", ""), "空身份不许存待确认")
+        self.assertIn("认不出", reply)
+
+
+class ChannelWiringTest(unittest.TestCase):
+    """三端传给公共流程的 (channel, chat_id, sender_id, text) 四元组。
+    传错顺序或传错字段, 群机器人会把待确认方案记到别人头上 —— 而这种错
+    在单元测试之外几乎不可能被发现。"""
+
+    def _capture(self):
+        seen = {}
+
+        async def fake(channel, chat_id, sender_id, text, db, cfg):
+            seen.update(channel=channel, chat_id=chat_id,
+                        sender_id=sender_id, text=text)
+            return "ok"
+        return seen, fake
+
+    def test_telegram_passes_chat_and_user_ids(self):
+        import asyncio
+        from app.config import store
+        from app.services import botflow, telegram as tg
+        seen, fake = self._capture()
+        orig = botflow.handle_bot_message
+        orig_send = tg._send_message
+
+        async def no_send(*a, **k):
+            return None
+        botflow.handle_bot_message = fake
+        tg._send_message = no_send
+        try:
+            asyncio.run(tg._handle_update({"message": {
+                "text": "螺丝刀在哪",
+                "chat": {"id": 12345},
+                "from": {"id": 67890, "is_bot": False},
+            }}, store.get()))
+        finally:
+            botflow.handle_bot_message = orig
+            tg._send_message = orig_send
+        self.assertEqual(seen["channel"], "telegram")
+        self.assertEqual(seen["chat_id"], "12345")
+        self.assertEqual(seen["sender_id"], "67890")
+        self.assertEqual(seen["text"], "螺丝刀在哪")
+
+    def test_telegram_strips_at_mention(self):
+        import asyncio
+        from app.config import store
+        from app.services import botflow, telegram as tg
+        seen, fake = self._capture()
+        orig = botflow.handle_bot_message
+        orig_send = tg._send_message
+
+        async def no_send(*a, **k):
+            return None
+        botflow.handle_bot_message = fake
+        tg._send_message = no_send
+        try:
+            asyncio.run(tg._handle_update({"message": {
+                "text": "@my_bot 确认",
+                "chat": {"id": 1}, "from": {"id": 2, "is_bot": False},
+            }}, store.get()))
+        finally:
+            botflow.handle_bot_message = orig
+            tg._send_message = orig_send
+        self.assertEqual(seen["text"], "确认",
+                         "@提及不剥掉的话, classify_reply 会判成 other、把方案丢掉")
+
+    def test_feishu_passes_sender_id_through(self):
+        """飞书的 sender_id 以前提取了却没往下传, T7 才接上 —— 钉住它。"""
+        import asyncio
+        from app.config import store
+        from app.services import botflow, feishu
+        seen, fake = self._capture()
+        orig = botflow.handle_bot_message
+        orig_send = feishu._send_text
+        botflow.handle_bot_message = fake
+        feishu._send_text = lambda *a, **k: None
+        try:
+            asyncio.run(feishu._handle_async(
+                "螺丝刀在哪", "oc_chat_1", "ou_sender_1", store.get()))
+        finally:
+            botflow.handle_bot_message = orig
+            feishu._send_text = orig_send
+        self.assertEqual(seen["channel"], "feishu")
+        self.assertEqual(seen["chat_id"], "oc_chat_1")
+        self.assertEqual(seen["sender_id"], "ou_sender_1")
+
 
 if __name__ == "__main__":
     unittest.main()

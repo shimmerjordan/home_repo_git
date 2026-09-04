@@ -114,13 +114,18 @@ async def webhook(request: Request, db: Session = Depends(get_db)):
             "dingtalk", conversation_id, str(sender or ""), text, db, cfg)
     except Exception as exc:
         # 钉钉这条是 FastAPI 路由 —— 异常抛出去就是 500, 群里一个字都收不到,
-        # 用户只会觉得机器人死了。飞书的 _handle_async 和 Telegram 的
-        # _polling_loop 各自有兜底 except, 只有这条没有。
+        # 用户只会觉得机器人死了。
+        # 回复用固定文案: exc 的原文可能带 SQL 语句、参数、连接串、文件路径,
+        # 而这是发到真人群里的消息。细节只进日志。
+        app_log.error("dingtalk: 处理失败 %s", exc)
         log.exception("dingtalk botflow: %s", exc)
-        return {"msgtype": "text", "text": {"content": f"出错了: {exc}"}}
+        return {"msgtype": "text", "text": {"content": "出错了, 我这边记下了日志"}}
     app_log.info("dingtalk.done chat=%s len=%s", conversation_id, len(reply_text))
-    return {"msgtype": "markdown",
-            "markdown": {"title": "仓储管家", "text": reply_text}}
+    # 钉钉的 markdown 是标准子集, 单个 \n 不构成换行 —— botfmt 的纯文本清单
+    # (编号方案/候选列表/· 结果行) 全是连续单换行, 塞进 markdown 会挤成一坨。
+    # text 消息按 \n 换行。代价只是丢掉 title (仅用于通知栏摘要, 已收敛成
+    # 固定的"仓储管家", 本来就没有信息量)。
+    return {"msgtype": "text", "text": {"content": reply_text}}
 
 
 @router.post("/test")

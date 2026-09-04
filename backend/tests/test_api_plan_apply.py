@@ -290,6 +290,39 @@ class ApiPlanApplyTest(unittest.TestCase):
         # 4 + 位置深度(3) = 7, 而不是简报原定的 4, 原因就是这层 lazy load。
         self.assertLessEqual(count["n"], 7, f"pending-returns 用了 {count['n']} 次 SELECT")
 
+    def test_dingtalk_webhook_passes_conversation_and_sender(self):
+        """conversationId 是 T7 新提取的字段 —— 以前完全没被读过。
+        它就是待确认方案的会话归属, 取错了会把方案记到别的群。"""
+        from app.config import store
+        from app.services import botflow
+        seen = {}
+
+        async def fake(channel, chat_id, sender_id, text, db, cfg):
+            seen.update(channel=channel, chat_id=chat_id,
+                        sender_id=sender_id, text=text)
+            return "ok"
+        store.update({"dingtalk": {"enabled": True}})
+        orig = botflow.handle_bot_message
+        botflow.handle_bot_message = fake
+        try:
+            async def go():
+                async with self._client() as c:
+                    r = await c.post("/api/dingtalk/webhook", json={
+                        "text": {"content": "螺丝刀在哪"},
+                        "conversationId": "cid_abc",
+                        "senderStaffId": "staff_1",
+                    })
+                    self.assertEqual(r.status_code, 200, r.text)
+                    # 修复 1 之后钉钉发的是 text 消息
+                    self.assertEqual(r.json()["msgtype"], "text")
+            self._run(go())
+        finally:
+            botflow.handle_bot_message = orig
+            store.update({"dingtalk": {"enabled": False}})
+        self.assertEqual(seen["channel"], "dingtalk")
+        self.assertEqual(seen["chat_id"], "cid_abc")
+        self.assertEqual(seen["sender_id"], "staff_1")
+
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)

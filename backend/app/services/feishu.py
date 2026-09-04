@@ -341,8 +341,11 @@ async def _handle_async(text: str, chat_id: str, sender_id: str, cfg) -> None:
         finally:
             db.close()
     except Exception as exc:
-        log.exception("feishu intent: %s", exc)
-        reply = f"AI 出错了: {exc}"
+        # exc 的原文可能带 SQL 语句、参数、连接串、文件路径 —— 这是发到真人
+        # 群里的消息, 细节只进日志。T7 之后流经这里的异常种类变宽了 (以前
+        # _run_intent 先接掉了 LLMError)。
+        log.exception("feishu botflow: %s", exc)
+        reply = "出错了, 我这边记下了日志"
     try:
         # _send_text is sync (lark SDK) — run in executor so we don't block the loop.
         await asyncio.get_event_loop().run_in_executor(
