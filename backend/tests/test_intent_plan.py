@@ -191,16 +191,36 @@ class PlanTest(unittest.TestCase):
         self.assertFalse(I._looks_force_new("给抽纸补货"))
         self.assertTrue(I._looks_force_new("新增一个香薰"))
 
-    def test_put_in_upgraded_across_all_ops_when_sentence_says_new(self):
-        """(Task 8 起) 整句是"新增"措辞而 LLM 一条 force_new 都没标时,
-        全部 put_in 一起升级 —— 无法可靠判断"新增"修饰的是哪一个, 宁可整句都按新增处理。
-        LLM 只要自己标了任何一条 force_new, 就不再做这个整句覆盖 (见 ForceNewAttributionTest)。"""
+    def test_force_new_fallback_limited_to_its_own_clause(self):
+        """(Task 8 修复轮) 整句兜底只作用于含"新增"的那个分句。
+        "新增香薰, 把毛巾放进洗漱柜" 里毛巾是已有的东西被收纳 —— 把它也升级成
+        新建会静默建一条重复档案; 留 put_in 的话最坏是回"库里没有X, 要新建吗"。
+        问比乱写安全。"""
         ops = I._normalize_operations(parsed_with([
             {"intent": "put_in", "item_name": "香薰", "quantity": 1},
             {"intent": "put_in", "item_name": "毛巾", "quantity": 1},
         ]), "新增香薰, 把毛巾放进洗漱柜")
-        self.assertEqual([o["intent"] for o in ops], ["create_item", "create_item"])
-        self.assertTrue(all(o["force_new"] for o in ops))
+        self.assertEqual([o["intent"] for o in ops], ["create_item", "put_in"])
+        self.assertTrue(ops[0]["force_new"])
+        self.assertFalse(ops[1]["force_new"])
+
+    def test_fallback_skips_item_in_later_clause(self):
+        """"再"起的新动作是另一件事, 不受"新增"管。"""
+        ops = I._normalize_operations(parsed_with([
+            {"intent": "put_in", "item_name": "跑步机", "quantity": 1},
+            {"intent": "put_in", "item_name": "螺丝", "quantity": 2},
+        ]), "新增跑步机到书房, 再放两个螺丝到工具箱")
+        self.assertEqual([o["intent"] for o in ops], ["create_item", "put_in"])
+
+    def test_fallback_still_fires_when_location_follows_comma(self):
+        """"录入体温计, 放卫生间" 里逗号后面是位置不是另一个物品 ——
+        体温计仍然该升级 (这是现有 eval case new-record 的行为)。"""
+        ops = I._normalize_operations(parsed_with([
+            {"intent": "put_in", "item_name": "体温计", "quantity": 1,
+             "location_name": "卫生间"},
+        ]), "帮我录入一个体温计, 放卫生间")
+        self.assertEqual(ops[0]["intent"], "create_item")
+        self.assertTrue(ops[0]["force_new"])
 
     # ---- 多物品一条不丢 ----
 

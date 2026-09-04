@@ -217,6 +217,21 @@ FORCE_NEW_VERBS = re.compile(r"新增|新建|新添|添加|录入|新登记|记�
 # 反例: 这些措辞是补库存/归位, 即使句中出现"买"也**不能**当成全新物品。
 RESTOCK_HINTS = re.compile(r"补货|补充|又买|再买|补上|添满")
 
+# 分句边界: 标点, 以及"再/然后/接着/另外"这类起新动作的连接词。
+# 整句 force_new 兜底只作用于含"新增"措辞的那个分句 —— "新增跑步机到书房,
+# 再放两个螺丝到工具箱" 里"新增"只管跑步机, 螺丝是另一件事。把它也升级成
+# 新建会给已有的螺丝静默建一条重复档案, 而不升级的话最坏只是回一句
+# "库里没有X, 要新建吗" (T4 之后 put_in 找不到就是这个行为) —— 问比乱写安全。
+_CLAUSE_SPLIT = re.compile(r"[,，;；。!!?？\n]|再|然后|接着|另外|顺便")
+
+
+def _force_new_clause(utterance: str) -> str:
+    """含"新增"措辞的那个分句; 找不到就返回空串 (那就一条都不升级, 偏保守)。"""
+    for part in _CLAUSE_SPLIT.split(utterance or ""):
+        if FORCE_NEW_VERBS.search(part):
+            return part
+    return ""
+
 # 量词 → 倍数。只收有确定倍数的; "些/若干/几"这类模糊词不进表 (维持 1)。
 #
 # 为什么"双/对/副"是 1 而不是 2: 它们的计数单位就是"双"本身 —— 家里记袜子记的是
@@ -375,10 +390,13 @@ def _normalize_operations(parsed: dict[str, Any], utterance: str = "") -> list[d
         seen.add(_op_key(op))
         ops.append(op)
     # 句子明确是新增措辞, 而 LLM 一条都没标 force_new —— 说明它没做这个判断,
-    # 那就整句按新增处理。只要它标了任何一条, 就尊重它的判断, 一个字都不改。
+    # 那就按"新增"所在的那个分句来兜底。只要它标了任何一条, 就尊重它的判断,
+    # 一个字都不改。
     if sentence_force_new and ops and not any(o.get("force_new") for o in ops):
+        clause = _force_new_clause(utterance)
         for o in ops:
-            if o["intent"] == "put_in":
+            name = o.get("item_name") or ""
+            if o["intent"] == "put_in" and name and name in clause:
                 o["intent"] = "create_item"
                 o["force_new"] = True
     if dropped:
