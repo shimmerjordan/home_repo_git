@@ -17,24 +17,27 @@ let itemsFresh = false
 let locationsFresh = false
 let itemsInflight = null
 let locationsInflight = null
-// 每次 invalidate() (或 force 请求) 递增。发起 fetch 时记下当时的 generation,
-// resolve 时若 generation 已经过期 (期间又被 invalidate/force 了) 则结果作废:
+// items 和 locations 各自一个 generation 计数, 互不影响 —— 不能共用一个计数器:
+// 比如只 force 刷新 locations 时, 不该把一个完全不相关、正在途中的 loadItems()
+// 判为过期。invalidate() (或对应资源的 force 请求) 递增对应计数; 发起 fetch 时
+// 记下当时的值, resolve 时若已经过期 (期间又被 invalidate/force 了) 则结果作废:
 // 不写 items.value / locations.value, 不标 fresh —— 否则"失效前发出的旧请求"
 // 会在失效后把 fresh 重新钉回 true, 直到下次 invalidate 才更正。
-let generation = 0
+let itemsGen = 0
+let locationsGen = 0
 
 const activeItems = computed(() => items.value.filter((i) => (i.quantity || 0) > 0))
 
 function loadItems(force = false) {
   if (itemsFresh && !force) return Promise.resolve(items.value)
   // force 时哪怕已经有一个在途请求, 也不能复用它 —— 那个请求可能是失效前发出的,
-  // 拿到的是变更前的旧数据。递增 generation 作废它, 另起一个。
-  if (force) { generation += 1; itemsInflight = null }
+  // 拿到的是变更前的旧数据。递增 itemsGen 作废它, 另起一个。
+  if (force) { itemsGen += 1; itemsInflight = null }
   if (!itemsInflight) {
-    const gen = generation
+    const gen = itemsGen
     const p = api.listItems({ limit: 1000, include_depleted: true })
       .then((rows) => {
-        if (gen === generation) { items.value = rows; itemsFresh = true }
+        if (gen === itemsGen) { items.value = rows; itemsFresh = true }
         return rows
       })
       .finally(() => { if (itemsInflight === p) itemsInflight = null })
@@ -45,12 +48,12 @@ function loadItems(force = false) {
 
 function loadLocations(force = false) {
   if (locationsFresh && !force) return Promise.resolve(locations.value)
-  if (force) { generation += 1; locationsInflight = null }
+  if (force) { locationsGen += 1; locationsInflight = null }
   if (!locationsInflight) {
-    const gen = generation
+    const gen = locationsGen
     const p = api.listLocations()
       .then((rows) => {
-        if (gen === generation) { locations.value = rows; locationsFresh = true }
+        if (gen === locationsGen) { locations.value = rows; locationsFresh = true }
         return rows
       })
       .finally(() => { if (locationsInflight === p) locationsInflight = null })
@@ -64,7 +67,8 @@ function loadAll(force = false) {
 }
 
 function invalidate() {
-  generation += 1
+  itemsGen += 1
+  locationsGen += 1
   itemsFresh = false
   locationsFresh = false
   itemsInflight = null

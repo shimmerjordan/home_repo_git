@@ -820,7 +820,7 @@ const inConfirm = computed(() => phase.value === 'confirm-text' || phase.value =
       <div ref="sceneSection" class="card p-4 space-y-2 lg:col-span-2 scroll-mt-20">
         <div class="flex items-center justify-between">
           <div class="font-semibold">家中位置预览</div>
-          <button class="text-xs text-slate-400 hover:text-slate-700" @click="loadScene">↻ 刷新</button>
+          <button class="text-xs text-slate-400 hover:text-slate-700" @click="loadScene()">↻ 刷新</button>
         </div>
         <div v-if="!sceneLocations.length" class="text-sm text-slate-400 py-12 text-center">
           还没有 3D 布局,去 "🏗 3D" 标签先搭一下房间。
