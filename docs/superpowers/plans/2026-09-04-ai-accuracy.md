@@ -91,7 +91,7 @@ fixture 里"电池"在书桌1 有 8 个、洗漱柜有 4 个 (见 `backend/tests
 - [ ] **Step 2: 跑一次确认它没被执行 (机制不存在)**
 
 Run: eval 回放命令 (见 Global Constraints)
-Expected: 这条 case 会因为 `apply` 分类不存在于报告、或 `decisions`/`after` 被忽略而**不做任何落库校验** —— 也就是说它会"假绿"。用 `--verbose` 观察确认它只跑了 plan。这一步是为了确认现状, 不是为了看红。
+Expected: 这条 case 会因为 `apply` 分类不存在于报告、或 `decisions`/`after` 被忽略而**不做任何落库校验** —— 也就是说它会"假绿"。观察逐条输出确认它只跑了 plan (逐条输出是默认行为, `-q` 才安静; **没有 `--verbose` 这个参数**)。这一步是为了确认现状, 不是为了看红。
 
 - [ ] **Step 3: 实现 decisions 翻译与 apply 执行**
 
@@ -1365,7 +1365,7 @@ prompt 改了之后旧 cassette 的 key 全部对不上, 留着只是垃圾:
 rm -f backend/eval/cassettes/*.json
 mkdir -p /tmp/evalcfg && cp data/config.json /tmp/evalcfg/config.json
 docker run --rm -v "$PWD/backend:/src" -v /tmp/evalcfg:/cfg -w /src \
-  -e CONFIG_PATH=/cfg/config.json repo_git-app python -m eval.run_eval --verbose
+  -e CONFIG_PATH=/cfg/config.json repo_git-app python -m eval.run_eval
 ```
 
 (不带 `--replay`、不带 `--network none`, 会真的调 LLM 并录下来。)
@@ -1374,7 +1374,7 @@ docker run --rm -v "$PWD/backend:/src" -v /tmp/evalcfg:/cfg -w /src \
 
 ```bash
 docker run --rm -v "$PWD/backend:/src" -v /tmp/evalcfg:/cfg -w /src --network none \
-  -e CONFIG_PATH=/cfg/config.json repo_git-app python -m eval.run_eval --replay --verbose \
+  -e CONFIG_PATH=/cfg/config.json repo_git-app python -m eval.run_eval --replay \
   | tee .superpowers/sdd/2026-09-03-perf-power-cleanup/eval-after-B.txt
 ```
 
