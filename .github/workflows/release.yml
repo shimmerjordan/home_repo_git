@@ -56,9 +56,13 @@ jobs:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           TAG: ${{ github.event.inputs.tag }}
         run: |
-          set -euo pipefail
-          TAG_SHA="$(gh api "repos/${{ github.repository }}/commits/${TAG}" --jq .sha)"
-          if [ "${TAG_SHA}" != "${{ github.sha }}" ]; then
+          set -uo pipefail
+          # 这一步只负责告警, 绝不能拦发布 —— 所以 gh api 自己失败 (限流 / 5xx /
+          # 权限不够) 时也只是拿不到 SHA, 走下面的空值分支, 不让 set -e 掀掉整个 job。
+          TAG_SHA="$(gh api "repos/${{ github.repository }}/commits/${TAG}" --jq .sha || true)"
+          if [ -z "${TAG_SHA}" ]; then
+            echo "::warning::没能取到 tag ${TAG} 指向的 commit (gh api 调用失败), 跳过这次一致性校验。"
+          elif [ "${TAG_SHA}" != "${{ github.sha }}" ]; then
             echo "::warning::workflow_dispatch 触发, 但 gate 测的是发起 dispatch 的分支 commit (${{ github.sha }}), 不是 tag ${TAG} 指向的 commit (${TAG_SHA})。这次发布没有被 gate 真正测过 —— 如果不是故意的, 取消后重新 dispatch 并把 'Use workflow from' 选成这个 tag。"
           fi
 

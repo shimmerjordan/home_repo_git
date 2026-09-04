@@ -18,6 +18,10 @@ Release 页那份 `compose.yml` 的 `image` **钉死版本号**(发布流水线�
 生成,见 `.github/workflows/release.yml`),所以下次 `up -d` 不会莫名换版本。升级 = 改
 `image` 那一行或重新下新版本的文件,然后 `up -d`。
 
+`image` 那行没变但远端同名 tag 被重推过(或你钉的是 `:latest`)时,`up -d` 不会去拉 ——
+`pull_policy: missing` 只在本地没有镜像时才拉。这种情况要显式刷新:
+`docker compose pull && docker compose up -d`。
+
 想要离线转写:`docker compose --profile whisper up -d`(镜像约 2GB,`ASR_MODEL=small`
 吃 1~2G 内存),再到设置页勾选"启用 Whisper"。
 
