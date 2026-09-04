@@ -3,6 +3,7 @@ import { ref, computed, onMounted, onBeforeUnmount, watch } from 'vue'
 import { api } from '../api'
 import { clientLog, logEvent } from '../composables/useClientLog'
 import { useAudioMeter } from '../composables/useAudioMeter'
+import { usePausablePoll } from '../composables/usePausablePoll'
 import Waveform from './Waveform.vue'
 
 const diag = ref(null)
@@ -16,7 +17,6 @@ const search = ref('')
 const front = clientLog()
 const meter = useAudioMeter({ bars: 28 })
 
-let timer = null
 const logScroll = ref(null)
 const copyHint = ref('')
 let copyHintTimer = null
@@ -84,17 +84,18 @@ async function loadLogs(reset = false) {
 onMounted(async () => {
   await loadDiag()
   await loadLogs(true)
-  // Pause auto-refresh while the user is selecting text in the log viewer —
-  // otherwise the 3s re-render clears the selection mid-copy.
-  timer = setInterval(() => { if (autoRefresh.value && !userSelecting.value) loadLogs() }, 3000)
   document.addEventListener('selectionchange', updateSelectionState)
 })
 onBeforeUnmount(() => {
-  clearInterval(timer); meter.stop()
+  meter.stop()
   document.removeEventListener('selectionchange', updateSelectionState)
   if (copyHintTimer) clearTimeout(copyHintTimer)
 })
 watch(levelFilter, () => loadLogs(true))
+
+// Pause auto-refresh while the user is selecting text in the log viewer —
+// otherwise the 3s re-render clears the selection mid-copy.
+usePausablePoll(() => { if (autoRefresh.value && !userSelecting.value) loadLogs() }, 3000)
 
 // Client-side capability checks
 const caps = computed(() => {

@@ -24,7 +24,7 @@ const BuildingPanel = defineAsyncComponent({
 // Tab state lives in the URL hash (#tab=items) so refreshing the page or sharing
 // a link keeps the user on the same view. Hash routing is enough — no full router
 // needed and it works behind nginx without any rewrite rules.
-const VALID_TABS = ['voice', 'items', 'locations', 'building', 'log', 'audit', 'logs', 'settings']
+const VALID_TABS = ['voice', 'items', 'locations', 'building', 'log', 'audit', 'logs', 'backup', 'settings']
 function _tabFromHash() {
   if (typeof window === 'undefined') return 'voice'
   const m = window.location.hash.match(/tab=([\w-]+)/)
@@ -256,17 +256,19 @@ onBeforeUnmount(() => { _pfCleanup?.() })
     </header>
 
     <main class="flex-1 p-2 sm:p-4 max-w-7xl w-full mx-auto">
-      <VoicePanel v-show="tab==='voice'" :settings="settings" :refresh-key="refreshKey" @changed="bumpRefresh" />
-      <ItemList v-show="tab==='items'" :refresh-key="refreshKey" @changed="bumpRefresh" />
-      <LocationManager v-show="tab==='locations'" :refresh-key="refreshKey" @changed="bumpRefresh" />
+      <!-- v-if + keep-alive: 首次进入才挂载 (省掉开机 8 个面板并发拉数据),
+           切走保留状态 (筛选条件、滚动位置、3D 相机)。 -->
       <keep-alive>
-        <BuildingPanel v-if="tab==='building'" :refresh-key="refreshKey" @changed="bumpRefresh" />
+        <VoicePanel v-if="tab==='voice'" :settings="settings" :refresh-key="refreshKey" @changed="bumpRefresh" />
+        <ItemList v-else-if="tab==='items'" :refresh-key="refreshKey" @changed="bumpRefresh" />
+        <LocationManager v-else-if="tab==='locations'" :refresh-key="refreshKey" @changed="bumpRefresh" />
+        <BuildingPanel v-else-if="tab==='building'" :refresh-key="refreshKey" @changed="bumpRefresh" />
+        <TransactionFeed v-else-if="tab==='log'" :refresh-key="refreshKey" />
+        <AuditPanel v-else-if="tab==='audit'" :refresh-key="refreshKey" />
+        <LogsPanel v-else-if="tab==='logs'" />
+        <BackupPanel v-else-if="tab==='backup'" />
+        <SettingsPanel v-else-if="tab==='settings'" @saved="loadSettings" />
       </keep-alive>
-      <TransactionFeed v-show="tab==='log'" :refresh-key="refreshKey" />
-      <AuditPanel v-show="tab==='audit'" :refresh-key="refreshKey" />
-      <LogsPanel v-show="tab==='logs'" />
-      <BackupPanel v-show="tab==='backup'" />
-      <SettingsPanel v-show="tab==='settings'" @saved="loadSettings" />
     </main>
 
     <footer class="text-center text-xs text-slate-400 py-3">
