@@ -589,17 +589,22 @@ function fitAll(animate = true) {
 function loop() {
   raf = 0
   if (!canRender()) { lastFrameT = 0; return }
-  inLoop = true
   const now = performance.now()
-  const dt = lastFrameT ? Math.min(0.05, (now - lastFrameT) / 1000) : 0.016
-  lastFrameT = now
-  // OrbitControls.update() 在阻尼未停时返回 true —— 松手后惯性滑行期间持续续期。它内部会
-  // 同步触发我们注册的 'change' 监听 (见 wake() 旁注), 期间 inLoop 挡住重入排帧。
-  if (controls.update()) activeUntil = Math.max(activeUntil, now + IDLE_AFTER_MS)
-  if (moteState) updateMotes(dt, now / 1000)
-  if (pulseTween) pulseTween()
-  renderer.render(scene, camera)
-  inLoop = false
+  inLoop = true
+  try {
+    const dt = lastFrameT ? Math.min(0.05, (now - lastFrameT) / 1000) : 0.016
+    lastFrameT = now
+    // OrbitControls.update() 在阻尼未停时返回 true —— 松手后惯性滑行期间持续续期。它内部会
+    // 同步触发我们注册的 'change' 监听 (见 wake() 旁注), 期间 inLoop 挡住重入排帧。
+    if (controls.update()) activeUntil = Math.max(activeUntil, now + IDLE_AFTER_MS)
+    if (moteState) updateMotes(dt, now / 1000)
+    if (pulseTween) pulseTween()
+    renderer.render(scene, camera)
+  } finally {
+    // 无论帧内是否抛异常都要复位, 否则 inLoop 卡在 true 会让此后所有 wake() 都排不出新帧
+    // ——渲染彻底停止且无法自愈。异常本身不吞, 该抛照样抛到控制台。
+    inLoop = false
+  }
   if (now < activeUntil) raf = requestAnimationFrame(loop)
   else lastFrameT = 0
 }
