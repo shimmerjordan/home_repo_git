@@ -77,9 +77,16 @@ let io = null
 
 function canRender() { return !!renderer && pageVisible && inView && activated }
 
+// controls.update() 内部在状态变化超过 EPS 时会同步 dispatchEvent('change') —— 也就是说
+// 我们注册的 change 监听会在 controls.update() 返回之前, 从 loop() 内部同步重入 wake()。
+// 此时 raf 已被 loop() 开头置 0, 若照常 requestAnimationFrame(loop) 会拿到一个新 id 并在
+// loop() 末尾被自己的续排调用覆盖掉 —— 那个先拿到的 id 就成了取消不掉的孤儿帧, 且每帧都会
+// 多排一份, 指数级增长。inLoop 为真时只延长 activeUntil, 续排交给 loop() 尾部统一处理。
+let inLoop = false
+
 function wake(ms = IDLE_AFTER_MS) {
   activeUntil = Math.max(activeUntil, performance.now() + ms)
-  if (!raf && canRender()) raf = requestAnimationFrame(loop)
+  if (!inLoop && !raf && canRender()) raf = requestAnimationFrame(loop)
 }
 
 function stopLoop() {
@@ -576,20 +583,23 @@ function fitAll(animate = true) {
   const target = { x: center.x, y: 1, z: center.z }
   const camPos = { x: center.x + dist * 0.7, y: dist * 0.8, z: center.z + dist * 0.7 }
   if (animate) tweenCamera(camPos, target, 900)
-  else { camera.position.set(camPos.x, camPos.y, camPos.z); controls.target.set(target.x, target.y, target.z) }
+  else { camera.position.set(camPos.x, camPos.y, camPos.z); controls.target.set(target.x, target.y, target.z); wake() }
 }
 
 function loop() {
   raf = 0
   if (!canRender()) { lastFrameT = 0; return }
+  inLoop = true
   const now = performance.now()
   const dt = lastFrameT ? Math.min(0.05, (now - lastFrameT) / 1000) : 0.016
   lastFrameT = now
-  // OrbitControls.update() 在阻尼未停时返回 true —— 松手后惯性滑行期间持续续期。
+  // OrbitControls.update() 在阻尼未停时返回 true —— 松手后惯性滑行期间持续续期。它内部会
+  // 同步触发我们注册的 'change' 监听 (见 wake() 旁注), 期间 inLoop 挡住重入排帧。
   if (controls.update()) activeUntil = Math.max(activeUntil, now + IDLE_AFTER_MS)
   if (moteState) updateMotes(dt, now / 1000)
   if (pulseTween) pulseTween()
   renderer.render(scene, camera)
+  inLoop = false
   if (now < activeUntil) raf = requestAnimationFrame(loop)
   else lastFrameT = 0
 }
@@ -1085,6 +1095,8 @@ function disposeAll() {
   transformControls?.dispose?.()
   disposeExtras()
   if (renderer) { renderer.dispose(); renderer.domElement.remove() }
+  // 置空, 否则 canRender() 里的 !!renderer 卸载后仍然为真, 判断失去意义。
+  scene = camera = renderer = controls = transformControls = null
 }
 onBeforeUnmount(() => {
   document.removeEventListener('visibilitychange', onVisibility)
