@@ -860,15 +860,17 @@ def apply_operations(
             "speech": "", "candidates": [], "matched_by": "", "pending": False,
             "location_path": None, "remaining": None, "location_options": [],
         }
+        if kind == OPT_SKIP:
+            r["speech"] = f"已跳过{_OP_VERB.get(intent, intent)}{r['item_name'] or '这一条'}"
+            results.append(r)
+            fragments.append(r["speech"])
+            continue
+        # 注意顺序: 用户明确选了 skip 的条目在上面就返回了 —— 他都说不执行了,
+        # 位置明不明确无关紧要, 回"位置不明确"会让人以为是系统没搞定。
         if loc_ambig:
             # 位置没能唯一确定 —— 宁可这条不落库, 也不要猜一个位置糊弄过去。
             r["speech"] = f"位置「{d.get('location_name')}」不明确, 没执行"
             r["pending"] = True
-            results.append(r)
-            fragments.append(r["speech"])
-            continue
-        if kind == OPT_SKIP:
-            r["speech"] = f"已跳过{_OP_VERB.get(intent, intent)}{r['item_name'] or '这一条'}"
             results.append(r)
             fragments.append(r["speech"])
             continue

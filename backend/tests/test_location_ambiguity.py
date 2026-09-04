@@ -71,5 +71,22 @@ class PlanLocationAmbiguityTest(unittest.TestCase):
         self.assertIn("书桌", r["reason"])
 
 
+class ApplySkipLocationAmbiguityTest(unittest.TestCase):
+    def test_skip_decision_wins_over_ambiguous_location(self):
+        """用户明确选了跳过, 就该回"已跳过", 不该回"位置不明确"。"""
+        db = make_session()
+        by_path, _ = seed(db)
+        db.add(models.Location(name="书桌10", kind="box",
+                               parent_id=by_path["我家/书房"].id))
+        db.flush()
+        base = {"operations": [], "speech": ""}
+        r = I.apply_operations(db, "把卷尺放进书桌", [
+            {"intent": "put_in", "option_key": "skip", "location_name": "书桌",
+             "quantity": 1}], base)
+        op = r["operations"][0]
+        self.assertIn("跳过", op["speech"])
+        self.assertNotIn("不明确", op["speech"])
+
+
 if __name__ == "__main__":
     unittest.main()
