@@ -133,4 +133,28 @@ CASES = [
          ops=[dict(intent="take_out", item="电池", qty=2)],
          decisions=[dict(intent="take_out", option_key="i:电池@书桌1", quantity=2)],
          after=[dict(item="电池", loc="书桌1", qty=6)]),
+
+    # ---- 删除物品档案 ----
+    dict(id="del-single", cat="delete", text="把螺丝刀这条记录删掉",
+         ops=[dict(intent="delete_item", item="螺丝刀")]),
+    dict(id="del-multi", cat="delete", text="把卷尺和螺丝刀的记录都删了",
+         ops=[dict(intent="delete_item", item="卷尺"),
+              dict(intent="delete_item", item="螺丝刀")]),
+    dict(id="del-absent", cat="delete", text="把跑步机的记录删掉",
+         ops=[dict(intent="delete_item", skip=True)]),
+
+    # ---- 确认后落库 ----
+    dict(id="apply-consume", cat="apply", text="用完了一瓶洗手液",
+         ops=[dict(intent="consume", item="洗手液", qty=1)],
+         decisions=[dict(intent="consume", option_key="i:洗手液", quantity=1)],
+         after=[dict(item="洗手液", qty=0)]),
+    dict(id="apply-new", cat="apply", text="新增一个订书机放到书桌1",
+         ops=[dict(intent="create_item", new="订书机", qty=1, to="书桌1")],
+         decisions=[dict(intent="create_item", option_key="new",
+                         new_item_name="订书机", location_name="书桌1", quantity=1)],
+         after=[dict(item="订书机", loc="书桌1", qty=1)]),
+    dict(id="apply-delete", cat="delete", text="把卷尺这条记录删掉",
+         ops=[dict(intent="delete_item", item="卷尺")],
+         decisions=[dict(intent="delete_item", option_key="i:卷尺")],
+         after=[dict(item="卷尺", exists=False)]),
 ]
