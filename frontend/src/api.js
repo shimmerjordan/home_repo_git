@@ -14,21 +14,23 @@ async function request(path, opts = {}) {
   return res.json()
 }
 
+// 过滤掉 undefined / null / '' 再拼 query string —— 三个列表接口共用。
+function qs(params = {}) {
+  const s = new URLSearchParams(
+    Object.entries(params).filter(([, v]) => v !== undefined && v !== null && v !== '')
+  ).toString()
+  return s ? '?' + s : ''
+}
+
 export const api = {
   health: () => request('/api/health'),
 
   // items
-  listItems: (params = {}) => {
-    const qs = new URLSearchParams(
-      Object.entries(params).filter(([, v]) => v !== undefined && v !== null && v !== '')
-    ).toString()
-    return request(`/api/items${qs ? '?' + qs : ''}`)
-  },
+  listItems: (params = {}) => request(`/api/items${qs(params)}`),
   createItem: (data) => request('/api/items', { method: 'POST', body: JSON.stringify(data) }),
   updateItem: (id, data) => request(`/api/items/${id}`, { method: 'PATCH', body: JSON.stringify(data) }),
   getItem: (id) => request(`/api/items/${id}`),
   deleteItem: (id) => request(`/api/items/${id}`, { method: 'DELETE' }),
-  itemTransactions: (id) => request(`/api/items/${id}/transactions`),
   exportItemsUrl: () => '/api/items/export.csv',
   importTemplateUrl: () => '/api/items/import-template.csv',
   importItems: async (file, mode = 'upsert') => {
@@ -43,20 +45,10 @@ export const api = {
   recentTx: (limit = 50) => request(`/api/transactions?limit=${limit}`),
   pendingReturns: () => request('/api/transactions/pending-returns'),
   depletedItems: () => request('/api/items/depleted'),
-  searchTx: (params = {}) => {
-    const qs = new URLSearchParams(
-      Object.entries(params).filter(([, v]) => v !== undefined && v !== null && v !== '')
-    ).toString()
-    return request(`/api/transactions${qs ? '?' + qs : ''}`)
-  },
+  searchTx: (params = {}) => request(`/api/transactions${qs(params)}`),
 
   // audit
-  listAudit: (params = {}) => {
-    const qs = new URLSearchParams(
-      Object.entries(params).filter(([, v]) => v !== undefined && v !== null && v !== '')
-    ).toString()
-    return request(`/api/audit${qs ? '?' + qs : ''}`)
-  },
+  listAudit: (params = {}) => request(`/api/audit${qs(params)}`),
 
   // diagnostics
   getDiag: () => request('/api/diag'),

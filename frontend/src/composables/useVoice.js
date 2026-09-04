@@ -17,7 +17,7 @@ const SR =
 const YES_WORDS = ['确定', '确认', '对', '是的', '是', '好的', '好', '嗯', '行', '可以', 'yes', 'ok', 'okay']
 const NO_WORDS  = ['取消', '不对', '不是', '算了', '不要', '不行', '别', 'no', 'cancel']
 
-export function classifyYesNo(text) {
+function classifyYesNo(text) {
   if (!text) return 'unknown'
   const t = text.toLowerCase().replace(/[，。！？,.\s]/g, '')
   for (const w of YES_WORDS) if (t.includes(w.toLowerCase())) return 'yes'
@@ -27,7 +27,7 @@ export function classifyYesNo(text) {
 
 // Classify into yes / no / wake / unknown — used during confirm dialogs so the user
 // can also start a new command by uttering the wake word again.
-export function classifyAnswer(text, wakeWords = []) {
+function classifyAnswer(text, wakeWords = []) {
   if (!text) return 'unknown'
   const t = text.toLowerCase().replace(/[，。！？,.\s]/g, '')
   for (const w of (wakeWords || [])) {

@@ -40,7 +40,7 @@ export const FURNITURE_CATALOG = [
   { kind: 'microwave',label: '微波炉', icon: '🍱', w: 0.5,  h: 0.30, d: 0.40, color: '#475569', container: false, levels: 0, placement: 'top' },
 ]
 
-export const KIND_DEFAULTS = Object.fromEntries(
+const KIND_DEFAULTS = Object.fromEntries(
   FURNITURE_CATALOG.map((c) => [c.kind, { w: c.w, h: c.h, d: c.d, color: c.color, levels: c.levels || 0 }])
 )
 KIND_DEFAULTS.other = { w: 0.6, h: 0.6, d: 0.6, color: '#64748b', levels: 0 }
@@ -49,7 +49,7 @@ export function catalogFor(kind) {
   return FURNITURE_CATALOG.find((c) => c.kind === kind) || null
 }
 
-export function defaultsFor(kind) {
+function defaultsFor(kind) {
   return KIND_DEFAULTS[kind] || KIND_DEFAULTS.other
 }
 
@@ -119,7 +119,7 @@ export function polygonBBox(poly) {
 // Snap a 2D direction to the nearest reference angle (in degrees) within tolerance.
 // `refs` defaults to horizontal/vertical (axis-aligned). Returns the snapped angle in
 // degrees, or null if none of the references is within tolerance.
-export function snapAngleDeg(angleDeg, refs = [0, 90, 180, -90], tolDeg = 7) {
+function snapAngleDeg(angleDeg, refs = [0, 90, 180, -90], tolDeg = 7) {
   let best = null, bestDiff = tolDeg + 1
   for (const r of refs) {
     const diff = Math.abs(((angleDeg - r + 540) % 360) - 180)
@@ -194,18 +194,6 @@ export function cleanPolygon(pts, minDistM = 0.05, collinearTolM = 0.01) {
     if (perp >= collinearTolM) passTwo.push(cur)
   }
   return passTwo.length >= 3 ? passTwo : passOne
-}
-
-// Signed area; positive = CCW (in screen-y-down space, which is our (x, z) plane).
-export function polygonSignedArea(poly) {
-  if (!poly || poly.length < 3) return 0
-  let s = 0
-  for (let i = 0, n = poly.length; i < n; i++) {
-    const [ax, az] = poly[i]
-    const [bx, bz] = poly[(i + 1) % n]
-    s += ax * bz - bx * az
-  }
-  return s / 2
 }
 
 // Returns true if any non-adjacent edges of `poly` cross. Used as a sanity check
