@@ -198,13 +198,17 @@ async def run_once(cfg: AppConfig, cases, verbose=False) -> dict:
         after_ok = None
         try:
             out = await I.parse_intent(case["text"], db, cfg)
-            result = I.execute_intent(db, case["text"], out["parsed"], cfg, plan_only=True)
+            plan_result = I.execute_intent(db, case["text"], out["parsed"], cfg, plan_only=True)
+            result = plan_result
             if case.get("decisions"):
                 # option_key 里的 "i:物品名@位置名" 要翻译成真实 id —— fixture 每个 case
                 # 重新建库, id 不稳定, 所以 case 里只能写名字。
+                # 打分永远用 plan_result: case["ops"] 描述的是方案阶段该长什么样 (含
+                # new= 这种"该新建"的期望), apply 之后的 operations 已经没有
+                # pending/selected/options 字段, 拿去打分会把"新建"误判成"匹配已有"。
+                # apply 的返回值只用于 after 断言, 不覆盖 result。
                 decisions = [_resolve_decision(db, d) for d in case["decisions"]]
-                base = dict(result)
-                result = I.apply_operations(db, case["text"], decisions, base)
+                I.apply_operations(db, case["text"], decisions, dict(plan_result))
                 db.commit()
             if case.get("after"):
                 after_ok = _check_after(db, case["after"])
