@@ -85,6 +85,17 @@ force_new (全新物品, 不要匹配):
 - 这种情况下就算库存里有同名的也不要匹配 —— 用户的意思是再建一条新档案
 - 反之 "把X放进Y" / "X放回Y" 是归位/入库, 不是新增: 用 put_in, force_new=false
 - "又买了两瓶水" / "补货" 这类是补库存: 用 put_in, 优先匹配已有档案 (包括"库存为0的旧档案"那一段)
+- **多物品句里, force_new 要每条操作各自判断, 不能因为句子里出现一次"新增"就全部设 true**:
+  "新增手表和铅笔到书桌1" -> 两条都是 force_new=true (两个都是新东西);
+  "新增一个订书机到书桌1, 再把卷尺也放进去" -> 只有订书机 force_new=true, 卷尺是已有物品收纳, 用 put_in / force_new=false
+
+否定 (用户明确说不要的物品):
+- 用户说"别拿/不要/不用/除了/甭" 某个物品时, 那个物品**不要出现在 operations 里**,
+  也不要出现在顶层字段: "拿卷尺, 别拿螺丝刀" 只输出卷尺这一条, 螺丝刀完全不提
+
+数量与量词:
+- 一打=12; 一双/一对/一副 记的是这个计数单位本身、不换算成只数 (比如"两双袜子" quantity=2);
+  "半瓶/半包"这类按 1 记 (quantity 只能是整数, 不做分数)
 
 注意:
 - "我刚拿了X"对应 take_out (借出, 待归位); "我用完了X" / "X 喝完了" / "扔了X" 对应 consume (永久减库存, 不待归位)
@@ -165,7 +176,8 @@ TOOLS = [
                                 "force_new": {
                                     "type": "boolean",
                                     "default": False,
-                                    "description": "true = 全新物品, 不要匹配已有物品",
+                                    "description": "true = 全新物品, 不要匹配已有物品。每条操作独立判断, "
+                                                   "不要因为句子里出现一次'新增'就给所有条目都设 true",
                                 },
                             },
                             "required": ["intent"],
@@ -205,6 +217,22 @@ FORCE_NEW_VERBS = re.compile(r"新增|新建|新添|添加|录入|新登记|记�
 # 反例: 这些措辞是补库存/归位, 即使句中出现"买"也**不能**当成全新物品。
 RESTOCK_HINTS = re.compile(r"补货|补充|又买|再买|补上|添满")
 
+# 量词 → 倍数。只收有确定倍数的; "些/若干/几"这类模糊词不进表 (维持 1)。
+#
+# 为什么"双/对/副"是 1 而不是 2: 它们的计数单位就是"双"本身 —— 家里记袜子记的是
+# 几双, 不是几只, 所以"两双袜子"记 2。放进表里不是为了乘, 是为了**认出**这个数字:
+# 不认识"双"的话, "拿两双袜子" 会走到默认值 1, 那个 2 就丢了。
+# "打"不同: 没人会记"1 打铅笔", 一打就该展开成 12。
+_QUANTIFIER_MAP = {"打": 12, "双": 1, "对": 1, "副": 1}
+_QUANTIFIER_RE = re.compile(
+    r"([一二两三四五六七八九十\d]+)\s*(" + "|".join(_QUANTIFIER_MAP) + r")")
+_CN_NUM = {"一": 1, "二": 2, "两": 2, "三": 3, "四": 4, "五": 5,
+           "六": 6, "七": 7, "八": 8, "九": 9, "十": 10}
+
+# 否定: 只处理"整句里明确不要某个东西"这种情形。条件句 ("如果没有就…")
+# 和指代 ("把它放回去") 不在范围内 —— 那需要多轮上下文, 是另一件事。
+NEGATION_HINTS = re.compile(r"别|不要|不用|除了|甭")
+
 
 def _looks_force_new(text: str) -> bool:
     """整句里是否有"这是个新物品"的明确措辞。"""
@@ -213,6 +241,48 @@ def _looks_force_new(text: str) -> bool:
     if RESTOCK_HINTS.search(text):
         return False
     return bool(FORCE_NEW_VERBS.search(text))
+
+
+def _cn_int(s: str) -> int | None:
+    if s.isdigit():
+        return int(s)
+    if len(s) == 1:
+        return _CN_NUM.get(s)
+    return None
+
+
+def _quantity_from_text(utterance: str, item_name: str, given: int | None) -> int:
+    """LLM 没给数量时, 从量词里兜一个。给了就用它的。
+
+    量词要挑**离这个物品名最近的那个前置量词**: "拿一打铅笔和两双袜子" 里
+    铅笔是 12、袜子是 2。只取整句第一个匹配的话, 袜子会跟着变成 12。
+    """
+    if given:
+        return given
+    text = utterance or ""
+    matches: list[tuple[int, int]] = []
+    for m in _QUANTIFIER_RE.finditer(text):
+        n = _cn_int(m.group(1))
+        if n:
+            matches.append((m.end(), n * _QUANTIFIER_MAP[m.group(2)]))
+    if not matches:
+        return 1
+    idx = text.find(item_name) if item_name else -1
+    if idx >= 0:
+        before = [q for end, q in matches if end <= idx]
+        if before:
+            return before[-1]
+    return matches[0][1]
+
+
+def _is_negated(utterance: str, item_name: str) -> bool:
+    """物品名前面 6 个字以内出现否定词 —— "拿卷尺, 别拿螺丝刀" 里只有螺丝刀被否定。"""
+    if not item_name or not NEGATION_HINTS.search(utterance or ""):
+        return False
+    idx = utterance.find(item_name)
+    if idx < 0:
+        return False
+    return bool(NEGATION_HINTS.search(utterance[max(0, idx - 6):idx]))
 
 
 def _coerce_int(val: Any) -> int | None:
@@ -286,22 +356,31 @@ def _normalize_operations(parsed: dict[str, Any], utterance: str = "") -> list[d
             "item_name": raw.get("item_name"),
             "location_id": _coerce_int(raw.get("location_id")),
             "location_name": raw.get("location_name"),
-            "quantity": max(1, _coerce_int(raw.get("quantity")) or 1),
+            "quantity": _quantity_from_text(utterance, raw.get("item_name") or "",
+                                            _coerce_int(raw.get("quantity"))),
             "force_new": bool(raw.get("force_new")),
         }
         # create_item 本身就是"建一条新的", 语义上等价于 force_new。
         if op["intent"] == "create_item":
             op["force_new"] = True
-        # 后端兜底: 整句有"新增/新建"措辞而模型给成了 put_in, 升级成 create_item。
-        # 只在单条操作时兜底 —— 多条时无法可靠判断"新增"修饰的是哪一个物品, 宁可不动。
-        elif (op["intent"] == "put_in" and sentence_force_new
-                and len(parsed.get("operations") or []) == 1):
+        # 反过来: 模型给了 force_new=true 却仍写成 put_in (字段没同步) ——
+        # 按它自己给的 force_new 校正 intent, 只改这一条自己的, 不影响其它条目。
+        elif op["intent"] == "put_in" and op["force_new"]:
             op["intent"] = "create_item"
-            op["force_new"] = True
+        if _is_negated(utterance, op["item_name"] or ""):
+            dropped.append(op)
+            continue
         if _op_key(op) in seen:
             continue
         seen.add(_op_key(op))
         ops.append(op)
+    # 句子明确是新增措辞, 而 LLM 一条都没标 force_new —— 说明它没做这个判断,
+    # 那就整句按新增处理。只要它标了任何一条, 就尊重它的判断, 一个字都不改。
+    if sentence_force_new and ops and not any(o.get("force_new") for o in ops):
+        for o in ops:
+            if o["intent"] == "put_in":
+                o["intent"] = "create_item"
+                o["force_new"] = True
     if dropped:
         parsed["_dropped_ops"] = dropped
     return ops

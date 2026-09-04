@@ -157,4 +157,32 @@ CASES = [
          ops=[dict(intent="delete_item", item="卷尺")],
          decisions=[dict(intent="delete_item", option_key="i:卷尺")],
          after=[dict(item="卷尺", exists=False)]),
+
+    # ---- 多物品句里的 force_new 归属 ----
+    dict(id="fnmulti-two", cat="forcenew_multi", text="新增手表和铅笔到书桌1",
+         ops=[dict(intent="create_item", new="手表", to="书桌1"),
+              dict(intent="create_item", new="铅笔", to="书桌1")]),
+    dict(id="fnmulti-mixed", cat="forcenew_multi",
+         text="新增一个订书机到书桌1, 再把卷尺也放进去",
+         ops=[dict(intent="create_item", new="订书机", to="书桌1"),
+              dict(intent="put_in", item="卷尺", to="书桌1")]),
+
+    # ---- 量词 ----
+    dict(id="qty-dozen", cat="quantifier", text="拿一打电池",
+         ops=[dict(intent="take_out", item="电池", qty=12)]),
+    dict(id="qty-pair", cat="quantifier", text="用了两双手套",
+         ops=[dict(intent="consume", skip=True)]),
+    dict(id="qty-half", cat="quantifier", text="用了半瓶洗手液",
+         ops=[dict(intent="consume", item="洗手液", qty=1)]),
+
+    # ---- 否定 ----
+    dict(id="neg-single", cat="negation", text="拿卷尺, 别拿螺丝刀",
+         ops=[dict(intent="take_out", item="卷尺", qty=1)]),
+    dict(id="neg-except", cat="negation", text="把书桌1 上的东西都拿走, 除了电池",
+         ops=[dict(intent="take_out", item="充电宝", qty=1),
+              dict(intent="take_out", item="充电器", qty=1)]),
+
+    # ---- 位置歧义 ----
+    dict(id="locambig-exact", cat="locambig", text="把卷尺放进书桌1",
+         ops=[dict(intent="put_in", item="卷尺", to="书桌1")]),
 ]

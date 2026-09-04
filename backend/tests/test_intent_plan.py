@@ -191,13 +191,16 @@ class PlanTest(unittest.TestCase):
         self.assertFalse(I._looks_force_new("给抽纸补货"))
         self.assertTrue(I._looks_force_new("新增一个香薰"))
 
-    def test_put_in_not_upgraded_when_multiple_ops(self):
-        """多物品时不做"新增"兜底升级 —— 无法可靠判断修饰的是哪一个。"""
+    def test_put_in_upgraded_across_all_ops_when_sentence_says_new(self):
+        """(Task 8 起) 整句是"新增"措辞而 LLM 一条 force_new 都没标时,
+        全部 put_in 一起升级 —— 无法可靠判断"新增"修饰的是哪一个, 宁可整句都按新增处理。
+        LLM 只要自己标了任何一条 force_new, 就不再做这个整句覆盖 (见 ForceNewAttributionTest)。"""
         ops = I._normalize_operations(parsed_with([
             {"intent": "put_in", "item_name": "香薰", "quantity": 1},
             {"intent": "put_in", "item_name": "毛巾", "quantity": 1},
         ]), "新增香薰, 把毛巾放进洗漱柜")
-        self.assertEqual([o["intent"] for o in ops], ["put_in", "put_in"])
+        self.assertEqual([o["intent"] for o in ops], ["create_item", "create_item"])
+        self.assertTrue(all(o["force_new"] for o in ops))
 
     # ---- 多物品一条不丢 ----
 
@@ -519,6 +522,91 @@ class QuantityDeltaTest(unittest.TestCase):
         it = next(i for i in items if i.name == "洗手液")
         apply_quantity_delta(it, "take_out", 99, None)
         self.assertEqual(it.quantity, 0)
+
+
+class ForceNewAttributionTest(unittest.TestCase):
+    """句子明确是"新增"时, 多物品句里每一条都该 force_new ——
+    以前的兜底只在单条操作时生效, "新增 A 和 B 到 C" 里 B 会去匹配已有档案。"""
+
+    def _norm(self, utterance, ops):
+        return I._normalize_operations({"operations": ops}, utterance)
+
+    def test_sentence_force_new_applies_to_all_ops(self):
+        ops = [
+            {"intent": "put_in", "item_name": "手表", "quantity": 1,
+             "location_name": "书桌1", "item_id": None, "location_id": None},
+            {"intent": "put_in", "item_name": "铅笔", "quantity": 1,
+             "location_name": "书桌1", "item_id": None, "location_id": None},
+        ]
+        out = self._norm("新增手表和铅笔到书桌1", ops)
+        self.assertTrue(all(o["force_new"] for o in out), out)
+
+    def test_llm_own_judgement_is_not_overridden(self):
+        """只要 LLM 自己给任何一条设了 force_new, 就说明它判断过了, 不覆盖。"""
+        ops = [
+            {"intent": "put_in", "item_name": "手表", "quantity": 1,
+             "force_new": True, "item_id": None, "location_id": None,
+             "location_name": None},
+            {"intent": "put_in", "item_name": "铅笔", "quantity": 1,
+             "force_new": False, "item_id": None, "location_id": None,
+             "location_name": None},
+        ]
+        out = self._norm("新增手表和铅笔", ops)
+        self.assertTrue(out[0]["force_new"])
+        self.assertFalse(out[1]["force_new"])
+
+    def test_restock_wording_never_force_new(self):
+        ops = [{"intent": "put_in", "item_name": "电池", "quantity": 2,
+                "item_id": None, "location_id": None, "location_name": None}]
+        out = self._norm("又买了两个电池", ops)
+        self.assertFalse(out[0]["force_new"])
+
+
+class QuantifierTest(unittest.TestCase):
+    def test_dozen(self):
+        self.assertEqual(I._quantity_from_text("拿一打铅笔", "铅笔", None), 12)
+
+    def test_pair(self):
+        """"两双袜子"记 2 —— 双/对/副 的计数单位就是"双"本身, 用户说几就是几。
+        跟"打"不一样: 没人会记"1 打铅笔", 一打就该展开成 12。"""
+        self.assertEqual(I._quantity_from_text("拿两双袜子", "袜子", None), 2)
+
+    def test_explicit_quantity_wins(self):
+        """LLM 已经给了数量就用它, 量词只在没给时兜底。"""
+        self.assertEqual(I._quantity_from_text("拿一打铅笔", "铅笔", 3), 3)
+
+    def test_quantifier_is_matched_to_its_own_item(self):
+        """一句话里多个物品各带量词时, 每个物品要拿离自己最近的那个 ——
+        只取整句第一个匹配的话, 袜子会跟着铅笔变成 12。"""
+        u = "拿一打铅笔和两双袜子"
+        self.assertEqual(I._quantity_from_text(u, "铅笔", None), 12)
+        self.assertEqual(I._quantity_from_text(u, "袜子", None), 2)
+
+    def test_half_stays_one(self):
+        """数量是整数列, "半瓶"记 1 —— 这是刻意的取舍, 不做分数。"""
+        self.assertEqual(I._quantity_from_text("用了半瓶洗手液", "洗手液", None), 1)
+
+
+class NegationTest(unittest.TestCase):
+    def test_negated_item_is_dropped(self):
+        ops = [
+            {"intent": "take_out", "item_name": "螺丝刀", "quantity": 1,
+             "item_id": None, "location_id": None, "location_name": None},
+            {"intent": "take_out", "item_name": "卷尺", "quantity": 1,
+             "item_id": None, "location_id": None, "location_name": None},
+        ]
+        parsed = {"operations": ops}
+        out = I._normalize_operations(parsed, "拿卷尺, 别拿螺丝刀")
+        names = [o["item_name"] for o in out]
+        self.assertIn("卷尺", names)
+        self.assertNotIn("螺丝刀", names)
+        self.assertTrue(parsed.get("_dropped_ops"))
+
+    def test_no_negation_keeps_everything(self):
+        ops = [{"intent": "take_out", "item_name": "螺丝刀", "quantity": 1,
+                "item_id": None, "location_id": None, "location_name": None}]
+        out = I._normalize_operations({"operations": ops}, "拿螺丝刀")
+        self.assertEqual(len(out), 1)
 
 
 if __name__ == "__main__":
