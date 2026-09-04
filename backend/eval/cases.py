@@ -14,6 +14,16 @@
              to      可选, put_in/create_item 的目标位置名
   只读 (find/assist) 的 case 用 ops 里的 intent="find" 表达。
 
+  decisions  可选。有它就在 plan 之后再跑一次 apply (端到端 plan → decisions →
+             apply)。每条 {intent, option_key, new_item_name?, location_name?,
+             quantity?}, option_key ∈ {"new", "skip", "i:<fixture物品名>"}。
+             **写 case 时用物品名而不是 id** —— fixture 每个 case 都重新建库,
+             物品 id 不稳定。同名多处 (比如"电池"在书桌1和洗漱柜各一份) 用
+             "物品名@位置名" 消歧, run_once 会在跑之前把它翻译成 "i:<真实id>"。
+  after      可选。apply 之后对库的断言, 每条 {item, loc?, qty?, exists?}。
+             item 同样支持 "物品名@位置名" 写法; qty 断言数量, exists=False
+             断言物品已被删除 (比如 delete_item 之后)。
+
 分类的意义: 用户抱怨的是"多物品操作经常不符合预期", 所以 multi / mixed 两类的
 准确率是这次优化的主要 KPI; confusable 类盯的是"存入新物品被错误合并"。
 """
@@ -117,4 +127,10 @@ CASES = [
          ops=[], expect_readonly=True),
     dict(id="read-assist", cat="readonly", text="我想拧个螺丝, 家里有什么能用的",
          ops=[], expect_readonly=True),
+
+    # ---- 确认后落库 (端到端 plan → decisions → apply) ----
+    dict(id="apply-takeout", cat="apply", text="拿两个电池",
+         ops=[dict(intent="take_out", item="电池", qty=2)],
+         decisions=[dict(intent="take_out", option_key="i:电池@书桌1", quantity=2)],
+         after=[dict(item="电池", loc="书桌1", qty=6)]),
 ]

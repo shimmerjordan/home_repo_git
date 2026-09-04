@@ -114,14 +114,55 @@ def _match(exp, op) -> bool:
     return True
 
 
-def score_case(case, result) -> dict:
+def _find_fixture_item(db, spec: str):
+    """"物品名" 或 "物品名@位置名" → Item 对象。同名多处时必须带位置。"""
+    from app import models
+    name, _, loc_name = spec.partition("@")
+    rows = db.query(models.Item).filter(models.Item.name == name).all()
+    if loc_name:
+        rows = [r for r in rows if r.location and r.location.name == loc_name]
+    if len(rows) != 1:
+        raise AssertionError(f"case 里的 {spec!r} 在 fixture 里命中 {len(rows)} 个, 必须唯一")
+    return rows[0]
+
+
+def _resolve_decision(db, d: dict) -> dict:
+    out = dict(d)
+    key = out.get("option_key") or ""
+    if key.startswith("i:"):
+        out["option_key"] = f"i:{_find_fixture_item(db, key[2:]).id}"
+    return out
+
+
+def _check_after(db, expects: list[dict]) -> bool:
+    """apply 之后核对库里的真实状态。"""
+    from app import models
+    for exp in expects:
+        name, _, loc_name = exp["item"].partition("@")
+        q = db.query(models.Item).filter(models.Item.name == name)
+        rows = [r for r in q.all()
+                if not loc_name or (r.location and r.location.name == loc_name)]
+        if "loc" in exp:
+            rows = [r for r in rows if r.location and r.location.name == exp["loc"]]
+        if exp.get("exists") is False:
+            if rows:
+                return False
+            continue
+        if len(rows) != 1:
+            return False
+        if "qty" in exp and rows[0].quantity != exp["qty"]:
+            return False
+    return True
+
+
+def score_case(case, result, after_ok=None) -> dict:
     ops = result.get("operations") or []
     exp_ops = case["ops"]
     if case.get("expect_readonly"):
         # 只读 case: 只要没有任何待确认的写操作就算对。
         ok = not any(o.get("pending") for o in ops)
         return dict(count_ok=True, target_ok=ok, exact=ok, matched=len(exp_ops),
-                    got=len(ops))
+                    got=len(ops), after_ok=after_ok)
     count_ok = len(ops) == len(exp_ops)
     pool = list(ops)
     matched = 0
@@ -138,7 +179,8 @@ def score_case(case, result) -> dict:
                 exact=count_ok and target_ok, matched=matched,
                 got=len(ops), misses=misses,
                 extra=[dict(intent=o["intent"], target=_target_of(o),
-                            qty=o.get("quantity")) for o in pool])
+                            qty=o.get("quantity")) for o in pool],
+                after_ok=after_ok)
 
 
 # ---- 跑一轮 ---------------------------------------------------------------
@@ -150,14 +192,24 @@ async def run_once(cfg: AppConfig, cases, verbose=False) -> dict:
         seed(db)
         t0 = time.time()
         err = None
+        after_ok = None
         try:
             out = await I.parse_intent(case["text"], db, cfg)
             result = I.execute_intent(db, case["text"], out["parsed"], cfg, plan_only=True)
+            if case.get("decisions"):
+                # option_key 里的 "i:物品名@位置名" 要翻译成真实 id —— fixture 每个 case
+                # 重新建库, id 不稳定, 所以 case 里只能写名字。
+                decisions = [_resolve_decision(db, d) for d in case["decisions"]]
+                base = dict(result)
+                result = I.apply_operations(db, case["text"], decisions, base)
+                db.commit()
+            if case.get("after"):
+                after_ok = _check_after(db, case["after"])
         except Exception as exc:                        # noqa: BLE001
             err = f"{type(exc).__name__}: {exc}"
             result = {"operations": []}
         ms = (time.time() - t0) * 1000
-        s = score_case(case, result)
+        s = score_case(case, result, after_ok=after_ok)
         s.update(id=case["id"], cat=case["cat"], text=case["text"], ms=ms, err=err,
                  stage=result.get("stage"))
         rows.append(s)
@@ -170,12 +222,23 @@ async def run_once(cfg: AppConfig, cases, verbose=False) -> dict:
     return {"rows": rows}
 
 
+def _after_pct(rs: list[dict]) -> str:
+    """有 after 字段的 case 中 after_ok 为真的比例; 一条 after 都没有就显示 '-'。"""
+    withafter = [r for r in rs if r.get("after_ok") is not None]
+    if not withafter:
+        s = "-"
+    else:
+        pct = sum(1 for r in withafter if r["after_ok"]) / len(withafter) * 100
+        s = f"{pct:.0f}%"
+    return f"{s:>8s}"
+
+
 def report(label: str, rows: list[dict]) -> None:
     by_cat: dict[str, list[dict]] = defaultdict(list)
     for r in rows:
         by_cat[r["cat"]].append(r)
     print(f"\n===== {label} =====")
-    print(f"{'分类':<12}{'条数':>4}{'全对':>7}{'条数对':>8}{'目标对':>8}{'均耗时':>9}")
+    print(f"{'分类':<12}{'条数':>4}{'全对':>7}{'条数对':>8}{'目标对':>8}{'落库对':>8}{'均耗时':>9}")
     for cat in sorted(by_cat):
         rs = by_cat[cat]
         n = len(rs)
@@ -183,12 +246,14 @@ def report(label: str, rows: list[dict]) -> None:
               f"{sum(r['exact'] for r in rs) / n * 100:>6.0f}%"
               f"{sum(r['count_ok'] for r in rs) / n * 100:>7.0f}%"
               f"{sum(r['target_ok'] for r in rs) / n * 100:>7.0f}%"
+              f"{_after_pct(rs)}"
               f"{sum(r['ms'] for r in rs) / n:>8.0f}ms")
     n = len(rows)
     print(f"{'合计':<12}{n:>4}"
           f"{sum(r['exact'] for r in rows) / n * 100:>6.0f}%"
           f"{sum(r['count_ok'] for r in rows) / n * 100:>7.0f}%"
           f"{sum(r['target_ok'] for r in rows) / n * 100:>7.0f}%"
+          f"{_after_pct(rows)}"
           f"{sum(r['ms'] for r in rows) / n:>8.0f}ms")
     bad = [r for r in rows if not r["exact"] or r["err"]]
     if bad:
