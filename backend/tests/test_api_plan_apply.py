@@ -323,6 +323,37 @@ class ApiPlanApplyTest(unittest.TestCase):
         self.assertEqual(seen["chat_id"], "cid_abc")
         self.assertEqual(seen["sender_id"], "staff_1")
 
+    def test_dingtalk_webhook_nickname_alone_does_not_become_identity(self):
+        """senderNick 是可改、可重名的展示名 —— 同群两人取一样昵称就共用
+        一把确认钥匙。缺失 senderStaffId/senderId 时必须交空串, 让 botflow
+        的空身份守卫去拒绝高风险操作, 而不是把昵称当成身份。"""
+        from app.config import store
+        from app.services import botflow
+        seen = {}
+
+        async def fake(channel, chat_id, sender_id, text, db, cfg):
+            seen.update(channel=channel, chat_id=chat_id,
+                        sender_id=sender_id, text=text)
+            return "ok"
+        store.update({"dingtalk": {"enabled": True}})
+        orig = botflow.handle_bot_message
+        botflow.handle_bot_message = fake
+        try:
+            async def go():
+                async with self._client() as c:
+                    r = await c.post("/api/dingtalk/webhook", json={
+                        "text": {"content": "螺丝刀在哪"},
+                        "conversationId": "cid_nick_only",
+                        "senderNick": "张三",
+                    })
+                    self.assertEqual(r.status_code, 200, r.text)
+            self._run(go())
+        finally:
+            botflow.handle_bot_message = orig
+            store.update({"dingtalk": {"enabled": False}})
+        self.assertEqual(seen["sender_id"], "",
+                         "只有展示名时不能把昵称当成稳定身份")
+
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)

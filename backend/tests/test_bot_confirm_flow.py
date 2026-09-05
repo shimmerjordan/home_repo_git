@@ -122,6 +122,65 @@ class FormatPlanTest(unittest.TestCase):
         self.assertIn("1. 删除档案 螺丝刀 ×1", out)
         self.assertNotIn("查找 苹果", out)
 
+    def test_format_plan_shows_which_record_was_preselected(self):
+        """高风险方案的全部意义是让用户看清要改的是哪一条。只写用户说的原词
+        ("充电"), 用户无从判断确认下去会动充电宝还是充电器。"""
+        from app.services import botfmt
+        plan = {"operations": [{
+            "intent": "take_out", "item_name": "充电", "quantity": 1,
+            "matched_by": "fuzzy", "item_id": 7, "selected": "i:7",
+            "location_options": [], "reason": "只有名字相近的, 请复核",
+            "candidates": [
+                {"item_id": 7, "item_name": "充电器", "location_path": "我家/书房/书桌1"},
+                {"item_id": 8, "item_name": "充电宝", "location_path": "我家/书房"},
+            ]}]}
+        out = botfmt.format_plan(plan, "有物品没认准, 是从几个候选里挑的")
+        self.assertIn("充电器", out, "必须写明实际会改的是哪一条")
+        self.assertIn("我家/书房/书桌1", out)
+
+    def test_format_plan_marks_skip_as_not_executing(self):
+        """selected=="skip" 渲染得和可执行条目一样, 用户会以为确认下去
+        它也会被执行 —— 实际上什么都不会发生。"""
+        from app.services import botfmt
+        plan = {"operations": [{
+            "intent": "take_out", "item_name": "不存在的东西", "quantity": 1,
+            "matched_by": "none", "item_id": None, "selected": "skip",
+            "location_options": [], "candidates": []}]}
+        out = botfmt.format_plan(plan, "库里没有这个物品")
+        self.assertIn("跳过", out)
+
+    def test_location_ambiguity_reply_lists_every_operation(self):
+        """位置歧义时整句都不执行, 所以回复必须把每一条都列出来 ——
+        只列有歧义的那几条, 用户会以为其余的做成了, 那条操作就此永久丢失。"""
+        from app.services import botfmt
+        plan = {"operations": [
+            {"intent": "take_out", "item_name": "螺丝刀", "quantity": 1,
+             "location_options": [], "matched_by": "exact"},
+            {"intent": "put_in", "item_name": "卷尺", "quantity": 1,
+             "location_name": "书桌", "matched_by": "exact",
+             "location_options": [{"location_id": 1, "name": "书桌1", "path": "我家/书房/书桌1"},
+                                  {"location_id": 2, "name": "书桌10", "path": "我家/书房/书桌10"}]},
+        ]}
+        out = botfmt.format_location_ambiguity(plan)
+        self.assertIn("螺丝刀", out, "没歧义的那条也必须出现, 否则用户以为它做成了")
+        self.assertIn("卷尺", out)
+        self.assertIn("都没执行", out)
+
+    def test_location_ambiguity_candidates_are_one_per_line(self):
+        """候选路径本身用 " / " 分隔层级, 如果多个候选也用 " / " 拼在一起,
+        读起来像一条 6 级深的路径而不是两个候选 —— 这条恢复路径 (让用户
+        照着候选重说) 实际上就断了。"""
+        from app.services import botfmt
+        plan = {"operations": [
+            {"intent": "put_in", "item_name": "卷尺", "quantity": 1,
+             "location_name": "书桌", "matched_by": "exact",
+             "location_options": [{"location_id": 1, "name": "书桌1", "path": "我家/书房/书桌1"},
+                                  {"location_id": 2, "name": "书桌10", "path": "我家/书房/书桌10"}]},
+        ]}
+        out = botfmt.format_location_ambiguity(plan)
+        self.assertEqual(out.count("\n     ("), 2, "两个候选应各自独占一行")
+        self.assertNotIn("书桌1 / 我家", out, "两条候选路径不能用 \" / \" 直接拼接")
+
 
 class BotFlowTest(unittest.TestCase):
     """三端共用的处理流程。parse_intent 用假的, 不联网。"""
@@ -443,6 +502,53 @@ class BotFlowTest(unittest.TestCase):
         db.refresh(luosidao)
         self.assertEqual(before_qty - luosidao.quantity, 1, "低风险该照常执行")
 
+    def test_llm_error_text_is_not_leaked_to_group(self):
+        """LLMError 带上游网关响应体前 500 字节 —— 可能含 API key 前缀、
+        内网 base_url、HTML 错误页。群里是真人在看。"""
+        import asyncio
+        from app.llm import intent as I
+        from app.llm.client import LLMError
+        from app.services import botflow
+        from _fixtures import make_session, seed
+        db = make_session(); seed(db)
+        orig = I.parse_intent
+
+        async def boom(text, db_, cfg):
+            raise LLMError('LLM HTTP 401: {"error":{"message":"Incorrect API key '
+                           'provided: sk-abcd1234xyz9"}}')
+        I.parse_intent = boom
+        try:
+            reply = asyncio.run(botflow.handle_bot_message(
+                "tg", "c1", "u1", "螺丝刀在哪", db, self._cfg()))
+        finally:
+            I.parse_intent = orig
+        self.assertNotIn("sk-abcd", reply)
+        self.assertNotIn("401", reply)
+
+    def test_confirm_delete_does_not_relist_deleted_item(self):
+        """delete 不产生 Transaction (executed=False), 而 base 里 5 分钟前算
+        方案时的 candidates 快照原样带进 apply —— format_result 在没有
+        recommendations 时会把 candidates 当"位置:"清单打出来, 打的是刚
+        被删掉的那条, 看上去像没删成、容易导致用户重复操作。"""
+        import asyncio
+        from app.services import botflow, pending
+        from _fixtures import make_session, seed, item_by
+        db = make_session(); items = seed(db)[1]
+        luosidao = item_by(items, "螺丝刀")
+        pending.put("tg", "c1", "u1", {
+            "stage": "plan",
+            "operations": [{"intent": "delete_item", "item_name": "螺丝刀",
+                            "quantity": 1, "selected": f"i:{luosidao.id}",
+                            "item_id": luosidao.id, "location_id": None,
+                            "location_name": None, "location_options": []}],
+            "candidates": [{"item_id": luosidao.id, "item_name": "螺丝刀",
+                            "location_path": "我家/书房"}],
+        })
+        reply = asyncio.run(botflow.handle_bot_message(
+            "tg", "c1", "u1", "确认", db, self._cfg()))
+        self.assertIn("已永久删除", reply)
+        self.assertNotIn("位置:", reply, "delete 已成功, 不该再把被删物品列进候选清单")
+
 
 class ChannelWiringTest(unittest.TestCase):
     """三端传给公共流程的 (channel, chat_id, sender_id, text) 四元组。
@@ -491,6 +597,7 @@ class ChannelWiringTest(unittest.TestCase):
         seen, fake = self._capture()
         orig = botflow.handle_bot_message
         orig_send = tg._send_message
+        tg._bot_username = "my_bot"          # 跳过 getMe
 
         async def no_send(*a, **k):
             return None
@@ -504,8 +611,56 @@ class ChannelWiringTest(unittest.TestCase):
         finally:
             botflow.handle_bot_message = orig
             tg._send_message = orig_send
+            tg._bot_username = None
         self.assertEqual(seen["text"], "确认",
                          "@提及不剥掉的话, classify_reply 会判成 other、把方案丢掉")
+
+    def test_telegram_strips_only_its_own_mention(self):
+        """「@张三 确认」是说给别人听的, 不能当成对机器人的确认 ——
+        那会立刻执行发言者挂起的删档。"""
+        import asyncio
+        from app.config import store
+        from app.services import botflow, telegram as tg
+        seen, fake = self._capture()
+        orig, orig_send = botflow.handle_bot_message, tg._send_message
+        tg._bot_username = "my_bot"          # 跳过 getMe
+
+        async def no_send(*a, **k):
+            return None
+        botflow.handle_bot_message = fake
+        tg._send_message = no_send
+        try:
+            asyncio.run(tg._handle_update({"message": {
+                "text": "@张三 确认", "chat": {"id": 1},
+                "from": {"id": 2, "is_bot": False}}}, store.get()))
+        finally:
+            botflow.handle_bot_message = orig
+            tg._send_message = orig_send
+            tg._bot_username = None
+        self.assertEqual(seen["text"], "@张三 确认", "别人的 @ 不该被剥掉")
+
+    def test_telegram_anonymous_sender_maps_to_empty_identity(self):
+        """频道消息/匿名管理员没有 from 字段 → user_id 是 None。
+        str(None) 得到 "None" 是个非空字符串, 会骗过空身份守卫, 让整个群
+        共用一个 pending 槽位。必须落到 "" 才能被守卫挡住。"""
+        import asyncio
+        from app.config import store
+        from app.services import botflow, telegram as tg
+        seen, fake = self._capture()
+        orig, orig_send = botflow.handle_bot_message, tg._send_message
+
+        async def no_send(*a, **k):
+            return None
+        botflow.handle_bot_message = fake
+        tg._send_message = no_send
+        try:
+            asyncio.run(tg._handle_update({"channel_post": {
+                "text": "螺丝刀在哪", "chat": {"id": -100123},
+            }}, store.get()))
+        finally:
+            botflow.handle_bot_message = orig
+            tg._send_message = orig_send
+        self.assertEqual(seen["sender_id"], "", f'得到 {seen["sender_id"]!r}')
 
     def test_feishu_passes_sender_id_through(self):
         """飞书的 sender_id 以前提取了却没往下传, T7 才接上 —— 钉住它。"""

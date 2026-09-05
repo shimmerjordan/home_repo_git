@@ -94,6 +94,12 @@ async def webhook(request: Request, db: Session = Depends(get_db)):
     sender = payload.get("senderStaffId") or payload.get("senderNick") or ""
     sender_id = payload.get("senderId") or ""
     bot_user_id = payload.get("chatbotUserId") or ""
+    # 待确认方案的归属必须是稳定 id: senderNick 是可改、可重名的展示名,
+    # 同群两个人取一样的昵称就等于共用一把确认钥匙; 用户在挂起期间改了
+    # 群昵称, 自己的方案就取不回来了。取不到稳定 id 就交空串, botflow 的
+    # 空身份守卫会拒绝高风险操作 —— 那正是我们要的 (白名单判定仍然用
+    # 上面的 sender 变量, 不受影响)。
+    identity = str(payload.get("senderStaffId") or payload.get("senderId") or "")
     if bot_user_id and sender_id and sender_id == bot_user_id:
         app_log.warning("dingtalk: self-message from chatbotUserId=%s — dropping", bot_user_id)
         return {"msgtype": "empty"}
@@ -111,7 +117,7 @@ async def webhook(request: Request, db: Session = Depends(get_db)):
     conversation_id = str(payload.get("conversationId") or "")
     try:
         reply_text = await botflow.handle_bot_message(
-            "dingtalk", conversation_id, str(sender or ""), text, db, cfg)
+            "dingtalk", conversation_id, identity, text, db, cfg)
     except Exception as exc:
         # 钉钉这条是 FastAPI 路由 —— 异常抛出去就是 500, 群里一个字都收不到,
         # 用户只会觉得机器人死了。

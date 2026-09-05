@@ -30,10 +30,27 @@ _task: asyncio.Task | None = None
 _reload_event: asyncio.Event | None = None
 _last_offset: int = 0
 _loop_iterations = 0
+_bot_username: str | None = None
 
 
 def _api_url(token: str, method: str) -> str:
     return f"https://api.telegram.org/bot{token}/{method}"
+
+
+async def _get_bot_username(token: str) -> str:
+    """缓存 bot 自己的 @用户名 —— 剥前缀只能剥自己的。
+    剥任意 @xxx 会把一句说给别人听的「@张三 确认」当成对机器人的确认,
+    直接执行发言者挂起的高风险操作 (删档)。"""
+    global _bot_username
+    if _bot_username is None:
+        try:
+            async with httpx.AsyncClient(timeout=10) as c:
+                r = await c.get(_api_url(token, "getMe"))
+            _bot_username = ((r.json().get("result") or {}).get("username") or "")
+        except Exception as exc:
+            log.warning("telegram getMe 失败, 暂不剥 @前缀: %s", exc)
+            return ""
+    return _bot_username
 
 
 async def _send_message(token: str, chat_id: int, text: str) -> None:
@@ -60,6 +77,11 @@ async def _handle_update(update: dict[str, Any], cfg) -> None:
     chat_id = chat.get("id")
     from_user = message.get("from") or {}
     user_id = from_user.get("id")
+    # 频道消息 / 超级群匿名管理员按 Telegram Bot API 都没有 from 字段
+    # ("may be empty for messages sent to channels"), 于是 user_id 是 None。
+    # str(None) 是非空字符串 "None", 会骗过 botflow 的空身份守卫, 让整个
+    # 群/频道共用同一个 pending 槽位 —— 必须显式落到 "" 才能被守卫挡住。
+    sender_id = "" if user_id is None else str(user_id)
 
     # SELF-ECHO GUARD: Telegram normally doesn't deliver the bot's own messages
     # back via getUpdates, but `from.is_bot` is a cheap defensive check —
@@ -87,7 +109,14 @@ async def _handle_update(update: dict[str, Any], cfg) -> None:
     # 群聊 privacy mode 默认开启, 用户唤起机器人的常规做法就是 "@mybot 确认"。
     # 不剥掉这个前缀, classify_reply 的整句锚定会判成 "other", botflow 会把
     # 刚存的待确认方案丢掉 —— 用户确认了一次反而要从头再来。
-    text = re.sub(r"^@\w+\s*", "", text).strip()
+    # 但只能剥机器人自己的用户名: privacy mode 关闭时机器人能看到群里所有
+    # 消息, 剥任意 @xxx 会把一句说给别人听的「@张三 确认」当成对机器人的
+    # 确认, 直接执行发言者挂起的高风险操作。拿不到用户名时索性不剥 ——
+    # 代价只是「@mybot 确认」这一种说法不灵 (可以直接说「确认」或回复机器人
+    # 那条消息), 而错剥的代价是执行别人没打算触发的删档, 两者不对等。
+    uname = await _get_bot_username(tg_cfg.bot_token)
+    if uname:
+        text = re.sub(rf"^@{re.escape(uname)}\s*", "", text, flags=re.IGNORECASE).strip()
     if not text:
         await _send_message(tg_cfg.bot_token, chat_id,
                             "怎么帮你? 试试 充电宝在哪 / 我刚拿了卷尺 / 我发烧了")
@@ -98,7 +127,7 @@ async def _handle_update(update: dict[str, Any], cfg) -> None:
     db = SessionLocal()
     try:
         reply = await botflow.handle_bot_message(
-            "telegram", str(chat_id), str(user_id), text, db, cfg)
+            "telegram", str(chat_id), sender_id, text, db, cfg)
     finally:
         db.close()
     await _send_message(tg_cfg.bot_token, chat_id, reply)
@@ -163,6 +192,8 @@ def start() -> None:
 
 def reload() -> None:
     """Bump the loop so a fresh config (new token / enabled flip) takes effect."""
+    global _bot_username
+    _bot_username = None  # 换了 token 就是换了机器人, 缓存的用户名跟着作废。
     if _reload_event is not None:
         try:
             _reload_event.set()

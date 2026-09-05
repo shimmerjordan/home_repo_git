@@ -45,6 +45,13 @@ async def handle_bot_message(
         if reply_kind == "no":
             return "已取消, 什么都没改。"
         base = dict(plan)
+        # 方案里的 candidates / recommendations 是 5 分钟前算方案时的快照,
+        # apply_operations 收尾时只覆盖 stage/operations/executed/transaction_id/
+        # speech, 不会动它们。留着的话, format_result 在没有 recommendations 时
+        # 会把 candidates 当"位置:"清单打出来 —— 打的是刚被删掉/改掉的那条快照,
+        # 删档场景下会变成"已永久删除 X"后面紧跟着"· X — 位置", 看着像没删成。
+        base.pop("candidates", None)
+        base.pop("recommendations", None)
         result = I.apply_operations(db, plan.get("_text") or "",
                                     _decisions_from_plan(plan), base)
         db.commit()
@@ -55,8 +62,11 @@ async def handle_bot_message(
     try:
         out = await I.parse_intent(text, db, cfg)
     except LLMError as exc:
+        # 固定文案: LLMError 会带上游网关响应体前 500 字节 (实测出现过 404 HTML、
+        # 回显 API key 前缀的 JSON、以及 base_url 主机名), 而这是发到真人群的消息。
+        # 细节只进日志 —— client.py 已经 log.error 过一次, 群里那份没有信息增量。
         app_log.warning("%s: 解析失败 %s", channel, exc)
-        return f"解析失败: {exc}"
+        return "AI 服务这会儿不通, 我这边记下了日志"
     parsed = out["parsed"]
 
     plan = I.execute_intent(db, text, parsed, cfg, plan_only=True)
