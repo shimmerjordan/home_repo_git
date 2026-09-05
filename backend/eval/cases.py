@@ -11,7 +11,13 @@
              new     期望"新建"而不是匹配已有 (值 = 期望的新物品名)
              skip    期望这条无法执行 (库里没有且不能新建)
              qty     期望数量
-             to      可选, put_in/create_item 的目标位置名
+             to      可选, put_in/create_item 的目标位置名 —— 校验 op 的
+                      location_path (目的地) 是否包含它
+             from_loc  可选, "选中的那条记录"原本所在的位置名 (同名多处时用,
+                      比如电池在书桌1和洗漱柜各一份)。跟 to 的区别: to 校验
+                      要把东西放去哪, from_loc 校验挑中的是哪一条已有记录 ——
+                      两者答案可能一样 (原地补货) 也可能不同 (从别处挪过来),
+                      分开写才测得出"选错了记录"这类回归
   只读 (find/assist) 的 case 用 ops 里的 intent="find" 表达。
 
   decisions  可选。有它就在 plan 之后再跑一次 apply (端到端 plan → decisions →
@@ -110,11 +116,12 @@ CASES = [
     dict(id="restock-depleted", cat="restock", text="又买了两包抽纸, 放洗漱柜",
          ops=[dict(intent="put_in", item="抽纸", qty=2, to="洗漱柜")]),
     dict(id="restock-existing", cat="restock", text="给电池补货, 再放四个到书桌1",
-         ops=[dict(intent="put_in", item="电池", loc="书桌1", qty=4, to="书桌1")]),
+         ops=[dict(intent="put_in", item="电池", loc="书桌1", from_loc="书桌1",
+                   qty=4, to="书桌1")]),
 
     # ---- 同名多处 ----
     dict(id="ambig-battery", cat="ambiguous", text="电池在哪",
-         ops=[dict(intent="find", item="电池")]),
+         ops=[dict(intent="find", item="电池", from_loc="书桌1")]),
 
     # ---- 库里没有且不能新建 ----
     dict(id="absent-take", cat="absent", text="我拿了吹风机",

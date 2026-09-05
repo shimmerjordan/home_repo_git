@@ -19,7 +19,8 @@ import unittest
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from eval.run_eval import _case_ok, _flag  # noqa: E402
+from eval import run_eval                          # noqa: E402
+from eval.run_eval import _case_ok, _flag, exit_code_for  # noqa: E402
 
 
 def row(exact=True, err="", after_ok=None, xfail=None):
@@ -64,23 +65,31 @@ class FlagTest(unittest.TestCase):
 
 
 class ExitCodeRuleTest(unittest.TestCase):
-    """run_eval.main() 的退出码规则: 只有 BAD 会让它非 0。"""
+    """run_eval.main() 的退出码规则: 只有 BAD 会让它非 0。
 
-    def _exit_code(self, rows):
-        return 0 if all(_flag(r) in ("OK ", "XFAIL", "XPASS") for r in rows) else 1
+    直接调 exit_code_for (main() 真正用的那个函数), 不再手抄一份规则副本 ——
+    以前这里自己写了一份 `_exit_code`, main() 里那行改坏了这些测试也照样绿。
+    """
 
     def test_xfail_alone_does_not_fail_the_run(self):
         self.assertEqual(
-            self._exit_code([row(), row(exact=False, xfail="已知不过")]), 0)
+            exit_code_for([row(), row(exact=False, xfail="已知不过")]), 0)
 
     def test_one_real_failure_fails_the_run(self):
         self.assertEqual(
-            self._exit_code([row(), row(exact=False, xfail="已知不过"),
-                             row(exact=False)]), 1)
+            exit_code_for([row(), row(exact=False, xfail="已知不过"),
+                           row(exact=False)]), 1)
 
     def test_xfail_with_error_fails_the_run(self):
         self.assertEqual(
-            self._exit_code([row(), row(err="cassette 缺失", xfail="已知不过")]), 1)
+            exit_code_for([row(), row(err="cassette 缺失", xfail="已知不过")]), 1)
+
+    def test_main_uses_the_shared_exit_code_rule(self):
+        """main() 必须走 exit_code_for, 不能自己再写一份判定 ——
+        测试手抄一份规则副本时, 改坏 main() 里那行它照样全绿。"""
+        import inspect
+        src = inspect.getsource(run_eval.main)
+        self.assertIn("exit_code_for", src)
 
 
 if __name__ == "__main__":

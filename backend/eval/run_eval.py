@@ -50,11 +50,44 @@ def _key(cfg, messages, tools, max_tokens) -> str:
     return hashlib.sha256(blob.encode()).hexdigest()[:32]
 
 
+TOOLS_HASH_PATH = CASSETTE_DIR / "_tools.sha256"
+
+
+def _tools_hash() -> str:
+    blob = json.dumps(I.TOOLS, ensure_ascii=False, sort_keys=True)
+    return hashlib.sha256(blob.encode()).hexdigest()
+
+
+def _check_tools_hash(mode: str) -> None:
+    """_key() 只把 `bool(tools)` 哈希进 cassette 文件名 —— 改坏 TOOLS 本身 (删字段/
+    塞一个模型没见过的枚举值) 不会让任何 cassette miss, --replay 照样满分退出 0,
+    对这类回归零感知。故意不把 tools 塞进 _key: 那样已经录好的 47 个 cassette 会
+    全部失效, 又要真调 LLM 重录一遍花钱。改用这个旁挂文件校验同样的东西。"""
+    current = _tools_hash()
+    if mode == "record":
+        # 录制 = 用当前 TOOLS 建立新基线。
+        TOOLS_HASH_PATH.write_text(current, encoding="utf-8")
+        return
+    if mode == "replay":
+        if not TOOLS_HASH_PATH.exists():
+            # 第一次跑: 现有 cassette 就是基线, 把当前 TOOLS 记下来, 不动 cassette。
+            TOOLS_HASH_PATH.write_text(current, encoding="utf-8")
+            return
+        baseline = TOOLS_HASH_PATH.read_text(encoding="utf-8").strip()
+        if baseline != current:
+            print("TOOLS 变了 (与 cassettes/_tools.sha256 记录的基线不一致): "
+                  "现有 cassette 里录的响应反映的是旧的工具契约, --replay 不能拿"
+                  "它们当新 TOOLS 的答案用 —— 需要去掉 --replay 重录一遍。",
+                  file=sys.stderr)
+            sys.exit(1)
+
+
 def install_cassette(mode: str):
     """mode: record | replay | off"""
     if mode == "off":
         return
     CASSETTE_DIR.mkdir(parents=True, exist_ok=True)
+    _check_tools_hash(mode)
     original = llm_client.LLMClient.chat
 
     async def patched(self, messages, *, tools=None, force_json=False,
@@ -91,6 +124,26 @@ def _target_of(op) -> tuple[str, str]:
     return ("skip", "")
 
 
+def _selected_location_path(op) -> str:
+    """选中的那条记录**当前实际所在**的位置 —— 不是目的地。
+
+    find 这类只读行的 location_path 本来就是"物品现在在哪"; 但 put_in/take_out/
+    consume/create_item 这些待确认写操作的 location_path 是 _resolve_location
+    解析出的**目的地**, 跟"选中了同名多处里的哪一条"是两码事。要知道选中的那条
+    记录原来在哪, 得去 candidates (方案汇总的候选列表, 序列化时带了各自的
+    location_path) 里按选中的 item_id 找回来。
+    """
+    if not op.get("pending"):
+        return op.get("location_path") or ""
+    sel_id = op.get("item_id")
+    if sel_id is None:
+        return ""
+    for c in op.get("candidates") or []:
+        if c.get("item_id") == sel_id:
+            return c.get("location_path") or ""
+    return ""
+
+
 def _match(exp, op) -> bool:
     if exp["intent"] != op["intent"]:
         # create_item 与 put_in+新建 在用户看来是同一件事, 视作等价。
@@ -112,6 +165,15 @@ def _match(exp, op) -> bool:
             # 位置只在同名多处时才校验, 用包含判断避免路径写法差异。
             if exp["loc"] not in path:
                 return False
+        if exp.get("from_loc"):
+            # 校验"选中的是哪一条记录", 不是目的地 —— 同名多处时选错了这里会露出来。
+            if exp["from_loc"] not in _selected_location_path(op):
+                return False
+    if exp.get("to"):
+        # put_in/create_item 的目标位置。之前从来没被读过, 位置解析整个失效也测不出来。
+        path = op.get("location_path") or ""
+        if exp["to"] not in path:
+            return False
     if "qty" in exp and op.get("quantity") != exp["qty"]:
         return False
     return True
@@ -339,6 +401,12 @@ def build_cfg(args) -> AppConfig:
     return cfg
 
 
+def exit_code_for(rows: list[dict]) -> int:
+    """整轮的退出码。抽成函数是为了能被测试直接打到 —— 以前测试里手抄了一份
+    规则副本, 改坏 main() 里那行它照样全绿, 而那正是 CI 门禁本身。"""
+    return 0 if all(_flag(r) in ("OK ", "XFAIL", "XPASS") for r in rows) else 1
+
+
 def main() -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("--replay", action="store_true", help="只用 cassette, 不联网")
@@ -379,9 +447,7 @@ def main() -> int:
           f"thinking={cfg.llm.thinking or '(不传)'} cases={len(cases)}")
     out = asyncio.run(run_once(cfg, cases, verbose=not args.quiet))
     report("总览", out["rows"])
-    rows = out["rows"]
-    # xfail 的准确性失败不算数, 但它的异常仍然算 —— 见 _flag 的注释。
-    return 0 if all(_flag(r) in ("OK ", "XFAIL", "XPASS") for r in rows) else 1
+    return exit_code_for(out["rows"])
 
 
 if __name__ == "__main__":
