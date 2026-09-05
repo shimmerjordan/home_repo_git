@@ -285,13 +285,11 @@ def _quantity_from_text(utterance: str, item_name: str, given: int | None) -> in
     (负数/零是模型偶尔把"少了两个"解析成 -2 这类数据损坏, 原样落库会让
     take_out 的 max(0, q-(-2)) 变成加库存)。
 
-    这里用 `given > 1` 而不是 `given > 0`: SYSTEM_PROMPT 明确要求模型"没说数量
-    就是 1", 顶层字段和 operations 数组的 quantity 字段因此**永远**是个具体数字,
-    1 到底是"用户就说了一个"还是"模型没算, 落到了默认值"根本无法区分。只有
-    大于 1 的数字才是模型主动给出的、能确定不是默认值的信号; 真给了 1 的话,
-    这里落空后面也会算出 1, 结果不变 —— 唯一的行为差异只在"给了 1 但同一分句
-    里其实有量词"这种情况, 那种情况就该信量词 (这正是 T8 量词兜底对单物品句
-    生效的必要条件, 见 execute_intent 里 A2 的顶层字段合成路径)。
+    "模型没给" 这个信息靠 `given is None` 表达, 所以 `_op_from_parsed` **不能**
+    把它钳成 1 —— 一旦钳了, 量词兜底对单物品句就永远介入不了。曾经试过改判
+    `given > 1` 来绕开这点, 那会让模型明确给出的 1 也被忽略:
+    "拿一打铅笔和一个电池" 里电池给了 1 却被算成 12, 等于把量词渗透这个 bug
+    从另一个门放了回来。正确的做法是保住 None, 这里只认正数。
 
     量词要挑**离这个物品名最近、且同一分句内的前置量词**: "拿一打铅笔和两双
     袜子" 里铅笔是 12、袜子是 2; "拿一打铅笔, 再把牙膏放进抽屉" 里牙膏没带
@@ -299,7 +297,7 @@ def _quantity_from_text(utterance: str, item_name: str, given: int | None) -> in
     _CLAUSE_SPLIT)。量词匹配区间也不许和物品名本身重叠: "三打印纸"里的
     "打"是"打印纸"的一部分, 不是量词。
     """
-    if given is not None and given > 1:
+    if given is not None and given > 0:
         return given
     text = utterance or ""
     name = item_name or ""
@@ -365,7 +363,13 @@ def _coerce_int(val: Any) -> int | None:
 
 
 def _op_from_parsed(parsed: dict[str, Any]) -> dict[str, Any] | None:
-    """Extract a single operation dict from a top-level parsed intent (or None)."""
+    """Extract a single operation dict from a top-level parsed intent (or None).
+
+    quantity 这里**不钳成 1**, 保留 None: "模型没给数量"是量词兜底
+    (_quantity_from_text) 唯一的触发信号, 钳掉之后 "拿一打电池" 这类单物品句
+    永远只会取 1 个。三个调用点产出的 op 最终都会过 _normalize_operations,
+    下限在那里统一兜。
+    """
     if parsed.get("intent") not in BATCH_INTENTS:
         return None
     return {
@@ -374,7 +378,7 @@ def _op_from_parsed(parsed: dict[str, Any]) -> dict[str, Any] | None:
         "item_name": parsed.get("item_name"),
         "location_id": _coerce_int(parsed.get("location_id")),
         "location_name": parsed.get("location_name"),
-        "quantity": max(1, _coerce_int(parsed.get("quantity")) or 1),
+        "quantity": _coerce_int(parsed.get("quantity")),
         "force_new": bool(parsed.get("force_new")),
     }
 

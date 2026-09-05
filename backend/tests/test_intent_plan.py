@@ -549,15 +549,29 @@ class UnifiedPathTest(unittest.TestCase):
         apply_quantity_delta 的 max(0, q-12) 钳到 0, 库存差值只剩 8 —— 那是
         "库存不够"的钳制, 跟这里要测的"数量到底算没算成 12"是两件事。改断言
         execute_intent 返回的 operations[0]["quantity"] (简报里预留的换法),
-        那是执行前算出的意图数量, 不受库存钳制影响。"""
+        那是执行前算出的意图数量, 不受库存钳制影响。
+
+        parsed 里**不给** quantity: 量词兜底是"模型没算数量"时的安全网。实测
+        (eval cassette f08a3cf…) 真实模型对"拿一打电池"顶层直接给了 quantity=12,
+        自己就把量词算好了 —— 所以兜底只在模型漏算时才该介入。曾经为了让这条
+        测试过而改判 `given > 1`(把模型给的 1 也当成"没给"), 那会让"拿一打铅笔
+        和一个电池"里明说的一个电池被算成 12。"""
         from app.config import store
         db = make_session(); seed(db)
-        parsed = {"intent": "take_out", "item_name": "电池", "quantity": 1,
+        parsed = {"intent": "take_out", "item_name": "电池",
                   "confidence": 0.95, "speech": "", "candidates": [],
                   "recommendations": [], "operations": []}
         r = I.execute_intent(db, "拿一打电池", parsed, store.get())
         self.assertEqual(r["operations"][0]["quantity"], 12,
                          "一打=12, 顶层字段那条路也得认")
+
+    def test_explicit_quantity_survives_a_quantifier_elsewhere(self):
+        """模型明确给出的数量不许被同句里别的量词覆盖。
+        "拿一打铅笔和一个电池" —— 电池就是一个。"""
+        self.assertEqual(
+            I._quantity_from_text("拿一打铅笔和一个电池", "电池", 1), 1)
+        self.assertEqual(
+            I._quantity_from_text("拿一打铅笔和一个电池", "铅笔", None), 12)
 
     def test_putin_not_found_asks_for_confirmation(self):
         """(A7, critical) 机器人问了"要新建吗"就必须让这个问题可被回答 ——
