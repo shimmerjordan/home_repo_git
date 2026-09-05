@@ -576,6 +576,10 @@ class ChannelWiringTest(unittest.TestCase):
             return None
         botflow.handle_bot_message = fake
         tg._send_message = no_send
+        # 桩掉 bot 用户名: 不桩的话 _get_bot_username 会真的去打
+        # api.telegram.org/getMe。CI 是离线跑的, 那次请求只会超时后被兜底吃掉,
+        # 但每条这样的测试都要白等一次超时。空串 = 拿不到用户名 = 不剥前缀。
+        tg._bot_username = ""
         try:
             asyncio.run(tg._handle_update({"message": {
                 "text": "螺丝刀在哪",
@@ -585,6 +589,7 @@ class ChannelWiringTest(unittest.TestCase):
         finally:
             botflow.handle_bot_message = orig
             tg._send_message = orig_send
+            tg._bot_username = None
         self.assertEqual(seen["channel"], "telegram")
         self.assertEqual(seen["chat_id"], "12345")
         self.assertEqual(seen["sender_id"], "67890")
@@ -653,6 +658,7 @@ class ChannelWiringTest(unittest.TestCase):
             return None
         botflow.handle_bot_message = fake
         tg._send_message = no_send
+        tg._bot_username = ""        # 别让测试去打真实的 getMe
         try:
             asyncio.run(tg._handle_update({"channel_post": {
                 "text": "螺丝刀在哪", "chat": {"id": -100123},
@@ -660,6 +666,7 @@ class ChannelWiringTest(unittest.TestCase):
         finally:
             botflow.handle_bot_message = orig
             tg._send_message = orig_send
+            tg._bot_username = None
         self.assertEqual(seen["sender_id"], "", f'得到 {seen["sender_id"]!r}')
 
     def test_feishu_passes_sender_id_through(self):
