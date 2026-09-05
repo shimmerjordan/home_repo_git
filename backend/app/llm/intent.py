@@ -225,12 +225,22 @@ RESTOCK_HINTS = re.compile(r"补货|补充|又买|再买|补上|添满")
 _CLAUSE_SPLIT = re.compile(r"[,，;；。!!?？\n]|再|然后|接着|另外|顺便")
 
 
-def _force_new_clause(utterance: str) -> str:
-    """含"新增"措辞的那个分句; 找不到就返回空串 (那就一条都不升级, 偏保守)。"""
+def _force_new_clause_span(utterance: str) -> tuple[int, int] | None:
+    """含"新增"措辞的那个分句在原句里的 [起, 止) 区间; 没有就 None。
+
+    用区间而不是 `name in clause` 子串判断: "把螺丝放进工具箱, 再新增一把螺丝刀"
+    里 "螺丝" 是 "螺丝刀" 的子串, 子串判断会把已有的螺丝也升级成建新档。
+    """
+    pos = 0
     for part in _CLAUSE_SPLIT.split(utterance or ""):
-        if FORCE_NEW_VERBS.search(part):
-            return part
-    return ""
+        start = (utterance or "").find(part, pos)
+        if start < 0:
+            start = pos
+        end = start + len(part)
+        if part and FORCE_NEW_VERBS.search(part):
+            return (start, end)
+        pos = end
+    return None
 
 # 量词 → 倍数。只收有确定倍数的; "些/若干/几"这类模糊词不进表 (维持 1)。
 #
@@ -247,6 +257,10 @@ _CN_NUM = {"一": 1, "二": 2, "两": 2, "三": 3, "四": 4, "五": 5,
 # 否定: 只处理"整句里明确不要某个东西"这种情形。条件句 ("如果没有就…")
 # 和指代 ("把它放回去") 不在范围内 —— 那需要多轮上下文, 是另一件事。
 NEGATION_HINTS = re.compile(r"别|不要|不用|除了|甭")
+# "别忘/别客气"这类是习语, "不用的/不要的"这类是定语 (形容物品本身), 都不是
+# "不要这个物品"。误判的代价是静默丢掉用户真正要做的操作, 比漏判严重得多。
+_NEG_FALSE_FRIENDS = re.compile(r"别忘|别客气|不用谢|不用管")
+_NEG_ATTRIBUTIVE = re.compile(r"(别|不要|不用|甭)的")
 
 
 def _looks_force_new(text: str) -> bool:
@@ -267,37 +281,77 @@ def _cn_int(s: str) -> int | None:
 
 
 def _quantity_from_text(utterance: str, item_name: str, given: int | None) -> int:
-    """LLM 没给数量时, 从量词里兜一个。给了就用它的。
+    """LLM 没给数量时, 从量词里兜一个。给了正数就用它的 —— 结果永远 >= 1
+    (负数/零是模型偶尔把"少了两个"解析成 -2 这类数据损坏, 原样落库会让
+    take_out 的 max(0, q-(-2)) 变成加库存)。
 
-    量词要挑**离这个物品名最近的那个前置量词**: "拿一打铅笔和两双袜子" 里
-    铅笔是 12、袜子是 2。只取整句第一个匹配的话, 袜子会跟着变成 12。
+    这里用 `given > 1` 而不是 `given > 0`: SYSTEM_PROMPT 明确要求模型"没说数量
+    就是 1", 顶层字段和 operations 数组的 quantity 字段因此**永远**是个具体数字,
+    1 到底是"用户就说了一个"还是"模型没算, 落到了默认值"根本无法区分。只有
+    大于 1 的数字才是模型主动给出的、能确定不是默认值的信号; 真给了 1 的话,
+    这里落空后面也会算出 1, 结果不变 —— 唯一的行为差异只在"给了 1 但同一分句
+    里其实有量词"这种情况, 那种情况就该信量词 (这正是 T8 量词兜底对单物品句
+    生效的必要条件, 见 execute_intent 里 A2 的顶层字段合成路径)。
+
+    量词要挑**离这个物品名最近、且同一分句内的前置量词**: "拿一打铅笔和两双
+    袜子" 里铅笔是 12、袜子是 2; "拿一打铅笔, 再把牙膏放进抽屉" 里牙膏没带
+    量词, 不该跟着变成 12 —— 量词和物品名必须同一分句 (复用 A4 的
+    _CLAUSE_SPLIT)。量词匹配区间也不许和物品名本身重叠: "三打印纸"里的
+    "打"是"打印纸"的一部分, 不是量词。
     """
-    if given:
+    if given is not None and given > 1:
         return given
     text = utterance or ""
+    name = item_name or ""
+    idx = text.find(name) if name else -1
+    name_end = idx + len(name) if idx >= 0 else -1
+
+    # 物品名所在分句的 [起, 止) 区间; 找不到就整句都算 (没有分句信号可用)。
+    clause_start, clause_end = 0, len(text)
+    if idx >= 0:
+        pos = 0
+        for part in _CLAUSE_SPLIT.split(text):
+            start = text.find(part, pos)
+            if start < 0:
+                start = pos
+            end = start + len(part)
+            if start <= idx < end:
+                clause_start, clause_end = start, end
+                break
+            pos = end
+
     matches: list[tuple[int, int]] = []
     for m in _QUANTIFIER_RE.finditer(text):
+        if not (clause_start <= m.start() < clause_end):
+            continue
+        if idx >= 0 and m.start() < name_end and m.end() > idx:
+            continue
         n = _cn_int(m.group(1))
         if n:
             matches.append((m.end(), n * _QUANTIFIER_MAP[m.group(2)]))
     if not matches:
         return 1
-    idx = text.find(item_name) if item_name else -1
-    if idx >= 0:
-        before = [q for end, q in matches if end <= idx]
-        if before:
-            return before[-1]
-    return matches[0][1]
+    before = [q for end, q in matches if idx >= 0 and end <= idx]
+    best = before[-1] if before else matches[0][1]
+    return max(1, best or 1)
 
 
 def _is_negated(utterance: str, item_name: str) -> bool:
-    """物品名前面 6 个字以内出现否定词 —— "拿卷尺, 别拿螺丝刀" 里只有螺丝刀被否定。"""
+    """物品名前面 6 个字以内出现否定词 —— "拿卷尺, 别拿螺丝刀" 里只有螺丝刀被否定。
+
+    先把窗口里 `_NEG_FALSE_FRIENDS` (习语) 和 `_NEG_ATTRIBUTIVE` (定语) 命中的
+    片段抹掉 (替换成等长空格), 再看剩下的有没有真否定 —— 避免"别忘了拿X"
+    "不用的X"这类假朋友被误判成"不要X"。
+    """
     if not item_name or not NEGATION_HINTS.search(utterance or ""):
         return False
     idx = utterance.find(item_name)
     if idx < 0:
         return False
-    return bool(NEGATION_HINTS.search(utterance[max(0, idx - 6):idx]))
+    window = utterance[max(0, idx - 6):idx]
+    window = _NEG_FALSE_FRIENDS.sub(lambda m: " " * len(m.group()), window)
+    window = _NEG_ATTRIBUTIVE.sub(lambda m: " " * len(m.group()), window)
+    return bool(NEGATION_HINTS.search(window))
 
 
 def _coerce_int(val: Any) -> int | None:
@@ -393,10 +447,13 @@ def _normalize_operations(parsed: dict[str, Any], utterance: str = "") -> list[d
     # 那就按"新增"所在的那个分句来兜底。只要它标了任何一条, 就尊重它的判断,
     # 一个字都不改。
     if sentence_force_new and ops and not any(o.get("force_new") for o in ops):
-        clause = _force_new_clause(utterance)
+        span = _force_new_clause_span(utterance)
         for o in ops:
             name = o.get("item_name") or ""
-            if o["intent"] == "put_in" and name and name in clause:
+            if o["intent"] != "put_in" or not name or span is None:
+                continue
+            idx = (utterance or "").find(name)
+            if idx >= 0 and span[0] <= idx < span[1]:
                 o["intent"] = "create_item"
                 o["force_new"] = True
     if dropped:
@@ -1156,9 +1213,12 @@ def _execute_batch(
                         r["speech"] = f"库里没有{item.name}, 已新建×{qty}放到{loc_text}"
                     else:
                         # 不许静默建档 —— 与 plan 路径一致: 没明说是新东西就先问。
+                        # needs_confirmation 才是 botflow 认的信号, 问了就必须能被回答
+                        # (见单条路径同名分支的注释, A7)。
                         r["pending"] = True
                         r["matched_by"] = "none"
                         r["speech"] = f"库里没有{name}, 要新建吗"
+                        base["needs_confirmation"] = True
                         op_results.append(r)
                         fragments.append(r["speech"])
                         continue
@@ -1284,15 +1344,29 @@ def execute_intent(
     }
 
     ops = _normalize_operations(parsed, text)
-    if parsed.get("_dropped_ops"):
+    dropped = list(parsed.get("_dropped_ops") or [])
+    if dropped:
         # 以前这里是静默 continue —— 用户说了四件事只做成三件也毫无提示。
         app_log.warning("AI 返回了 %d 条无法识别的操作, 已忽略: %r",
-                        len(parsed["_dropped_ops"]), parsed["_dropped_ops"][:3])
-    if not ops:
-        # 单条操作时模型走顶层字段而不填 operations —— 合成一条, 让下游只有一套逻辑。
+                        len(dropped), dropped[:3])
+    if not ops and not dropped:
+        # 单条操作时模型走顶层字段而不填 operations (SYSTEM_PROMPT 就是这么要求的)。
+        # 合成一条**再过一遍 _normalize_operations** —— 否则量词/否定/force_new 兜底
+        # 对单物品句全部不生效, 而那恰恰是最常见的说法。
+        # `not dropped` 这个前提很要紧: operations 里的条目刚因为否定被丢掉时,
+        # 绝不能从顶层字段把它重建出来 —— 用户说的是"别拿"。
         single = _op_from_parsed(parsed)
         if single:
-            ops = [single]
+            synth: dict[str, Any] = {"operations": [single]}
+            ops = _normalize_operations(synth, text)
+            if synth.get("_dropped_ops"):
+                dropped.extend(synth["_dropped_ops"])
+
+    if not ops and dropped:
+        # 用户明确说了"别拿X"这类话, 而且没有别的要做的。不执行, 但要说清楚。
+        base["speech"] = "好的, 那就不动了"
+        base["intent"] = parsed.get("intent") or "unknown"
+        return base
 
     has_mutation = any(o["intent"] in MUTATION_INTENTS for o in ops)
     if ops and has_mutation and plan_only:
@@ -1502,7 +1576,11 @@ def execute_intent(
                 # 不许静默建档 —— 与批量路径 (_execute_batch) 一致: 没明说是新东西就先问,
                 # 单条(这里)和多条不能一个默默新建一个不建, 表现必须一样。
                 qty = int(parsed.get("quantity") or 1)
-                base["speech"] = speech or f"库里没有{name}, 要新建吗"
+                base["needs_confirmation"] = True
+                # 不能复用模型给的 speech —— 那句"已存入"是模型以为会执行才说的,
+                # 这里什么都没写库, 说了就是骗用户。botflow 只认 needs_confirmation
+                # 来决定要不要存待确认, 问了就必须让这个问题可被回答。
+                base["speech"] = f"库里没有{name}, 要新建吗"
                 base["operations"] = [_single_op(
                     intent, None, qty, pending=True, matched_by="none",
                     candidates=base["candidates"] or None, speech=base["speech"],

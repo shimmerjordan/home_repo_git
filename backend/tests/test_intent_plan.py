@@ -525,6 +525,58 @@ class UnifiedPathTest(unittest.TestCase):
         self.assertEqual(
             db.query(models.Item).filter(models.Item.name == "跑步机").count(), 1)
 
+    def test_negated_single_item_is_not_resurrected_from_top_level(self):
+        """(A2) 模型把单条操作放在顶层字段时, 否定过滤过的结果不能被顶层字段
+        覆盖回来 —— 用户说"别拿螺丝刀", 螺丝刀就不该少。"""
+        from app.config import store
+        db = make_session(); by, items = seed(db)
+        it = item_by(items, "螺丝刀"); before = it.quantity
+        parsed = {"intent": "take_out", "item_name": "螺丝刀", "quantity": 1,
+                  "confidence": 0.95, "speech": "", "candidates": [],
+                  "recommendations": [],
+                  "operations": [{"intent": "take_out", "item_name": "螺丝刀",
+                                  "quantity": 1}]}
+        r = I.execute_intent(db, "别拿螺丝刀", parsed, store.get())
+        db.refresh(it)
+        self.assertEqual(it.quantity, before, "说了别拿, 库存不该动")
+        self.assertFalse(r.get("executed"))
+
+    def test_top_level_single_op_gets_quantifier_fallback(self):
+        """(A2) 顶层字段那条路也要过 _normalize_operations, 否则 T8 的量词兜底
+        对最常见的单物品句全部不生效 (SYSTEM_PROMPT 要求单条操作留空 operations)。
+
+        不直接断言库存差值: fixture 里"电池"第一处只有 8 个, take_out 12 会被
+        apply_quantity_delta 的 max(0, q-12) 钳到 0, 库存差值只剩 8 —— 那是
+        "库存不够"的钳制, 跟这里要测的"数量到底算没算成 12"是两件事。改断言
+        execute_intent 返回的 operations[0]["quantity"] (简报里预留的换法),
+        那是执行前算出的意图数量, 不受库存钳制影响。"""
+        from app.config import store
+        db = make_session(); seed(db)
+        parsed = {"intent": "take_out", "item_name": "电池", "quantity": 1,
+                  "confidence": 0.95, "speech": "", "candidates": [],
+                  "recommendations": [], "operations": []}
+        r = I.execute_intent(db, "拿一打电池", parsed, store.get())
+        self.assertEqual(r["operations"][0]["quantity"], 12,
+                         "一打=12, 顶层字段那条路也得认")
+
+    def test_putin_not_found_asks_for_confirmation(self):
+        """(A7, critical) 机器人问了"要新建吗"就必须让这个问题可被回答 ——
+        设 needs_confirmation, botflow 才会存待确认。否则用户回"确认"只得到
+        "没有待确认的操作"。"""
+        from app.config import store
+        db = make_session(); seed(db)
+        parsed = {"intent": "put_in", "item_name": "跑步机", "quantity": 1,
+                  "location_name": "书房", "confidence": 0.95,
+                  "speech": "好嘞, 跑步机放到书房啦", "candidates": [],
+                  "recommendations": [], "operations": [], "force_new": False}
+        r = I.execute_intent(db, "把跑步机放进书房", parsed, store.get())
+        self.assertTrue(r.get("needs_confirmation"), "问了就得能被回答")
+        self.assertIn("要新建吗", r.get("speech") or "")
+        self.assertNotIn("放到书房啦", r.get("speech") or "",
+                         "不能复用模型那句'已存入' —— 什么都没写库")
+        self.assertEqual(
+            db.query(I.models.Item).filter(I.models.Item.name == "跑步机").count(), 0)
+
 
 class QuantityDeltaTest(unittest.TestCase):
     def test_adjust_is_absolute_not_delta(self):
@@ -581,6 +633,17 @@ class ForceNewAttributionTest(unittest.TestCase):
         out = self._norm("又买了两个电池", ops)
         self.assertFalse(out[0]["force_new"])
 
+    def test_force_new_clause_respects_word_position_not_substring(self):
+        """(A4) "螺丝"是"螺丝刀"的子串 —— 子串判断会把已有的螺丝也升级成建新档,
+        于是库里出现两条"螺丝", 之后的存取在两条之间随机命中。"""
+        ops = I._normalize_operations(parsed_with([
+            {"intent": "put_in", "item_name": "螺丝", "quantity": 1},
+            {"intent": "put_in", "item_name": "螺丝刀", "quantity": 1},
+        ]), "把螺丝放进工具箱, 再新增一把螺丝刀")
+        by_name = {o["item_name"]: o for o in ops}
+        self.assertEqual(by_name["螺丝"]["intent"], "put_in", "已有的螺丝不该被建新档")
+        self.assertEqual(by_name["螺丝刀"]["intent"], "create_item")
+
 
 class QuantifierTest(unittest.TestCase):
     def test_dozen(self):
@@ -606,6 +669,32 @@ class QuantifierTest(unittest.TestCase):
         """数量是整数列, "半瓶"记 1 —— 这是刻意的取舍, 不做分数。"""
         self.assertEqual(I._quantity_from_text("用了半瓶洗手液", "洗手液", None), 1)
 
+    def test_quantity_from_text_never_below_one(self):
+        """(A1) 模型偶尔给负数/零 (把"少了两个"解析成 -2)。负数进库存加减是
+        数据损坏: take_out 走 max(0, q-(-2)) 会让"取出"变成加库存。"""
+        self.assertEqual(I._quantity_from_text("拿螺丝刀", "螺丝刀", -5), 1)
+        self.assertEqual(I._quantity_from_text("拿螺丝刀", "螺丝刀", 0), 1)
+        self.assertEqual(I._quantity_from_text("拿螺丝刀", "螺丝刀", 3), 3)
+
+    def test_negative_quantity_is_clamped(self):
+        """(A1) 模型偶尔会给负数 (把"少了两个"解析成 -2)。负数进库存加减是数据损坏:
+        take_out 走 max(0, q-(-2)) 会让"取出"变成加库存。"""
+        for bad in (-2, 0, None):
+            ops = I._normalize_operations(parsed_with([
+                {"intent": "take_out", "item_name": "螺丝刀", "quantity": bad}]), "拿螺丝刀")
+            self.assertEqual(ops[0]["quantity"], 1, f"quantity={bad}")
+
+    def test_quantifier_does_not_bleed_across_clauses(self):
+        """(A5) "拿一打铅笔, 再把牙膏放进抽屉" —— 牙膏没带量词, 不该跟着变成 12。"""
+        u = "拿一打铅笔, 再把牙膏放进抽屉"
+        self.assertEqual(I._quantity_from_text(u, "铅笔", None), 12)
+        self.assertEqual(I._quantity_from_text(u, "牙膏", None), 1)
+
+    def test_quantifier_not_matched_inside_item_name(self):
+        """(A6) "三打印纸"里的"打"是物品名的一部分, 不是量词。"""
+        self.assertEqual(I._quantity_from_text("拿三打印纸", "打印纸", None), 1)
+        self.assertEqual(I._quantity_from_text("拿一打铅笔", "铅笔", None), 12)
+
 
 class NegationTest(unittest.TestCase):
     def test_negated_item_is_dropped(self):
@@ -627,6 +716,27 @@ class NegationTest(unittest.TestCase):
                 "item_id": None, "location_id": None, "location_name": None}]
         out = I._normalize_operations({"operations": ops}, "拿螺丝刀")
         self.assertEqual(len(out), 1)
+
+    def test_negation_ignores_idioms_and_attributives(self):
+        """(A3) "别忘了拿X"是提醒不是否定; "不用的X"是定语不是否定。
+        误判的代价是静默丢掉用户真正要做的操作。"""
+        ops = I._normalize_operations(parsed_with([
+            {"intent": "take_out", "item_name": "螺丝刀", "quantity": 1},
+            {"intent": "take_out", "item_name": "卷尺", "quantity": 1},
+        ]), "别忘了拿螺丝刀和卷尺")
+        self.assertEqual(sorted(o["item_name"] for o in ops), ["卷尺", "螺丝刀"])
+
+        ops2 = I._normalize_operations(parsed_with([
+            {"intent": "put_in", "item_name": "充电器", "quantity": 1}]),
+            "把不用的充电器放进抽屉")
+        self.assertEqual(len(ops2), 1, "定语'不用的'不是否定")
+
+    def test_real_negation_still_works(self):
+        ops = I._normalize_operations(parsed_with([
+            {"intent": "take_out", "item_name": "螺丝刀", "quantity": 1},
+            {"intent": "take_out", "item_name": "卷尺", "quantity": 1},
+        ]), "拿卷尺, 别拿螺丝刀")
+        self.assertEqual([o["item_name"] for o in ops], ["卷尺"])
 
 
 if __name__ == "__main__":
