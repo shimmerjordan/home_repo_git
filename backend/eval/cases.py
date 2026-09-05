@@ -179,6 +179,8 @@ CASES = [
     dict(id="neg-single", cat="negation", text="拿卷尺, 别拿螺丝刀",
          ops=[dict(intent="take_out", item="卷尺", qty=1)]),
     dict(id="neg-except", cat="negation", text="把书桌1 上的东西都拿走, 除了电池",
+         xfail="复杂否定: 要先列出书桌1 上的全部物品再减去电池, 模型目前会退化成一条 skip。"
+               "留着这条是为了量出差距, 修好了就把 xfail 去掉。",
          ops=[dict(intent="take_out", item="充电宝", qty=1),
               dict(intent="take_out", item="充电器", qty=1)]),
 

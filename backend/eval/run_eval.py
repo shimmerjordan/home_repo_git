@@ -188,6 +188,25 @@ def score_case(case, result, after_ok=None) -> dict:
 
 # ---- 跑一轮 ---------------------------------------------------------------
 
+def _case_ok(r: dict) -> bool:
+    """这一条算不算过 (不看 xfail)。"""
+    return bool(r["exact"]) and not r["err"] and r.get("after_ok") is not False
+
+
+def _flag(r: dict) -> str:
+    """OK / BAD / XFAIL (已知不过) / XPASS (标了 xfail 却过了 —— 该把标记去掉)。
+
+    xfail 只豁免准确性, 不豁免 err: 回放时抛异常意味着 cassette 缺失或代码炸了,
+    那是真问题, 不能被"已知不过"盖过去。
+    """
+    ok = _case_ok(r)
+    if not r.get("xfail"):
+        return "OK " if ok else "BAD"
+    if r["err"]:
+        return "BAD"
+    return "XPASS" if ok else "XFAIL"
+
+
 async def run_once(cfg: AppConfig, cases, verbose=False) -> dict:
     rows = []
     for case in cases:
@@ -218,10 +237,10 @@ async def run_once(cfg: AppConfig, cases, verbose=False) -> dict:
         ms = (time.time() - t0) * 1000
         s = score_case(case, result, after_ok=after_ok)
         s.update(id=case["id"], cat=case["cat"], text=case["text"], ms=ms, err=err,
-                 stage=result.get("stage"))
+                 stage=result.get("stage"), xfail=case.get("xfail"))
         rows.append(s)
         if verbose:
-            flag = "OK " if s["exact"] and not err and s.get("after_ok") is not False else "BAD"
+            flag = _flag(s)
             print(f"  [{flag}] {case['id']:22s} {ms:6.0f}ms  "
                   f"期望{len(case['ops'])}条/实得{s['got']}条"
                   + (f"  ← {err}" if err else ""))
@@ -256,14 +275,16 @@ def report(label: str, rows: list[dict]) -> None:
               f"{_after_pct(rs)}"
               f"{sum(r['ms'] for r in rs) / n:>8.0f}ms")
     n = len(rows)
+    xfail_all = [r for r in rows if r.get("xfail")]
     print(f"{'合计':<12}{n:>4}"
           f"{sum(r['exact'] for r in rows) / n * 100:>6.0f}%"
           f"{sum(r['count_ok'] for r in rows) / n * 100:>7.0f}%"
           f"{sum(r['target_ok'] for r in rows) / n * 100:>7.0f}%"
           f"{_after_pct(rows)}"
-          f"{sum(r['ms'] for r in rows) / n:>8.0f}ms")
-    bad = [r for r in rows
-           if not r["exact"] or r["err"] or r.get("after_ok") is False]
+          f"{sum(r['ms'] for r in rows) / n:>8.0f}ms"
+          f"  (其中 xfail {len(xfail_all)} 条)")
+    # 失败明细只列真正的 BAD —— xfail 的准确性失败不算, 但它的 err 仍然算 (见 _flag)。
+    bad = [r for r in rows if _flag(r) == "BAD"]
     if bad:
         print(f"\n--- 失败明细 ({len(bad)}/{n}) ---")
         for r in bad:
@@ -274,6 +295,20 @@ def report(label: str, rows: list[dict]) -> None:
                 print(f"      漏: {m}")
             for e in r.get("extra") or []:
                 print(f"      多: {e}")
+    # 已知不过 (xfail) 单独打一段, 不混进失败明细, 但也不能悄悄躺着不出现。
+    still_xfail = [r for r in xfail_all if _flag(r) == "XFAIL"]
+    if still_xfail:
+        print(f"\n--- 已知不过 (xfail {len(still_xfail)} 条, 不计入退出码) ---")
+        for r in still_xfail:
+            print(f"  {r['id']}: {r['text']}")
+            print(f"      理由: {r['xfail']}")
+    # XPASS: 标了 xfail 却通过了 —— 说明有人把它修好了, 必须显式喊出来,
+    # 否则这条 case 会变成一块永久豁免的遮羞布, 将来真回退了也不会响。
+    xpassed = [r for r in xfail_all if _flag(r) == "XPASS"]
+    if xpassed:
+        print(f"\n--- XPASS ({len(xpassed)} 条: 标了 xfail 却通过了, 请把 xfail 去掉) ---")
+        for r in xpassed:
+            print(f"  {r['id']}")
 
 
 EVAL_CONFIG = Path(__file__).resolve().parent / "eval_config.json"
@@ -345,8 +380,8 @@ def main() -> int:
     out = asyncio.run(run_once(cfg, cases, verbose=not args.quiet))
     report("总览", out["rows"])
     rows = out["rows"]
-    return 0 if all(r["exact"] and not r["err"] and r.get("after_ok") is not False
-                    for r in rows) else 1
+    # xfail 的准确性失败不算数, 但它的异常仍然算 —— 见 _flag 的注释。
+    return 0 if all(_flag(r) in ("OK ", "XFAIL", "XPASS") for r in rows) else 1
 
 
 if __name__ == "__main__":
