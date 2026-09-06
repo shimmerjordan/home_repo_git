@@ -1,37 +1,49 @@
-# 打个 v* 的 tag 就发一版:跑测试 → 构建多架构镜像推 GHCR → 建 Release
-# (正文用 .github/release-notes.md,并把版本钉死的 compose.yml 作为资产附上)。
+# 手动发布一版: 测试 → 构建多架构镜像推 GHCR → 建 Release (附两份 compose)。
 #
-#   git tag v0.8.0 && git push origin v0.8.0
+#   Actions 页 → 发布 → Run workflow。三个输入都有默认值, 通常直接跑。
 #
-# 发布页要让人能直接抄的东西就两样: 一个 compose.yml 和几行命令。所以这里的重点
-# 不是构建, 而是把 compose.yml 的 image 替换成带版本号的地址后上传成资产 ——
-# 用户下到的那份是钉死版本的, 不会因为我们改了 latest 而在下次 up -d 时变身。
-name: Release
+# ── 版本号来自 CHANGELOG.md, 不来自 tag ────────────────────────────────
+# `scripts/version.sh` 取所有 `## ` 标题里最大的版本号。**tag 是发布的结果而不是
+# 来源**: 靠 tag 意味着"先打 tag 再构建", 打错了还得删了重来; 更糟的是 tag 能指向
+# 任意 commit, 于是"门禁测的代码"和"要发布的代码"可能不是同一份。现在 tag 由这条
+# 流水线在发布成功后创建, 构建与门禁天然同一个 commit。
+#
+# 想临时发个别的号 (例如 0.11.0-rc.1), 用 version 输入覆盖。
+#
+# ── 只能手动触发 ────────────────────────────────────────────────────────
+# push 不触发它, 每次 push 自动跑的只有 ci.yml。这里每一步都对外产生副作用
+# (推 GHCR、顶掉 latest、建 Release), 该由人决定"现在发", 而不是由"我推了一行
+# 代码"决定。门禁自动化, 发布手动化。
+name: 发布
 
 on:
-  push:
-    tags: ['v*']
   workflow_dispatch:
     inputs:
-      tag:
-        description: '要发布的版本号 (如 v0.8.0), 必须是已存在的 tag'
-        required: true
+      version:
+        description: '版本号。留空 = 用 CHANGELOG.md 里最大的那个 (推荐)。填了则覆盖, 例如 0.11.0-rc.1'
+        required: false
+        default: ''
+      publish:
+        description: '真的发布? 取消勾选 = 照编照验, 但不推 GHCR / 不建 Release'
+        type: boolean
+        default: true
+      prerelease:
+        description: 'GitHub Release 标记为预发布?'
+        type: boolean
+        default: false
+
+# 一次发布跑到一半不该被顶掉 —— 中途取消会留下半成品镜像 tag / Release。
+# 撞车时排队等前一个跑完。
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
 
 permissions:
-  contents: write     # 建 release / 传资产
+  contents: write     # 建 release / 建 tag
   packages: write     # 推 GHCR
-
-# 用版本号分组, 保证同一个 tag 不会被重复发布两次撞在一起; 发布过程(尤其推镜像
-# 之后)中途被取消会留下半成品 release/镜像 tag, 所以绝不 cancel-in-progress ——
-# 撞车时排队等前一个跑完, 而不是互相打断。
-concurrency:
-  group: release-${{ github.event.inputs.tag || github.ref_name }}
-  cancel-in-progress: false
 
 jobs:
   # 发布前的闸门: 测试不过就不发。复用 ci.yml, 不重复写一遍。
-  # 注意: 走 workflow_dispatch 手动发布时, 这个 gate 跑的是**发起 dispatch 那个分支**
-  # 的代码, 不是 inputs.tag 指向的 commit。正常路径 (推 tag) 两者一致, 不受影响。
   gate:
     uses: ./.github/workflows/ci.yml
 
@@ -42,68 +54,74 @@ jobs:
     steps:
       - uses: actions/checkout@v4
         with:
-          ref: ${{ github.event.inputs.tag || github.ref }}
+          fetch-depth: 0      # 要读已有 tag 才能判断本次是不是最大版本
 
-      - name: 校验 gate 测的 commit 与要发布的 tag 是否一致 (仅 workflow_dispatch)
-        # 上面 gate job 复用 ci.yml 是本地 `uses: ./...` 引用, 规范规定这种引用
-        # 只能跑"触发本次 release.yml 运行"那个 commit 的代码, 不能指定成
-        # inputs.tag 的 commit (uses: 里也不允许塞表达式)。推 tag 触发时两者
-        # 天然一致; workflow_dispatch 手动触发时如果没有把 "Use workflow from"
-        # 选成这个 tag, gate 测的其实是别的 commit。结构上修不掉, 这里只做
-        # 运行期告警, 不拦截 —— 报错换成硬失败风险更大 (见 PR 描述权衡)。
-        if: github.event_name == 'workflow_dispatch'
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          TAG: ${{ github.event.inputs.tag }}
-        run: |
-          set -uo pipefail
-          # 这一步只负责告警, 绝不能拦发布 —— 所以 gh api 自己失败 (限流 / 5xx /
-          # 权限不够) 时也只是拿不到 SHA, 走下面的空值分支, 不让 set -e 掀掉整个 job。
-          TAG_SHA="$(gh api "repos/${{ github.repository }}/commits/${TAG}" --jq .sha || true)"
-          if [ -z "${TAG_SHA}" ]; then
-            echo "::warning::没能取到 tag ${TAG} 指向的 commit (gh api 调用失败), 跳过这次一致性校验。"
-          elif [ "${TAG_SHA}" != "${{ github.sha }}" ]; then
-            echo "::warning::workflow_dispatch 触发, 但 gate 测的是发起 dispatch 的分支 commit (${{ github.sha }}), 不是 tag ${TAG} 指向的 commit (${TAG_SHA})。这次发布没有被 gate 真正测过 —— 如果不是故意的, 取消后重新 dispatch 并把 'Use workflow from' 选成这个 tag。"
-          fi
-
-      - name: 算出版本号、镜像 tag 列表
+      - name: 算出版本号与镜像 tag
         id: meta
-        # 走 env 而不是把 ${{ }} 直接插进 shell: tag 名是外部输入, 直接内插等于给
-        # 脚本开了注入口子 (GitHub 官方也建议这么写)。
         env:
-          VERSION_IN: ${{ github.event.inputs.tag || github.ref_name }}
+          VERSION_IN: ${{ github.event.inputs.version }}
           REPO_IN: ${{ github.repository }}
         run: |
           set -euo pipefail
-          VERSION="${VERSION_IN}"
+
+          if [ -n "${VERSION_IN}" ]; then
+            VERSION="${VERSION_IN#v}"
+            echo "版本号来自手动输入: ${VERSION}"
+          else
+            VERSION="$(./scripts/version.sh)"
+            echo "版本号来自 CHANGELOG.md: ${VERSION}"
+            # 只有走 CHANGELOG 这条路时才校验副本一致 —— 手填的号 (rc 之类)
+            # 本来就不要求仓库里的副本跟着改。
+            ./scripts/version.sh --check
+          fi
+
+          VTAG="v${VERSION}"
           # GHCR 的路径必须全小写, 而 GitHub 用户名/仓库名可能带大写。
           REPO_LC="$(echo "${REPO_IN}" | tr '[:upper:]' '[:lower:]')"
-          IMAGE="ghcr.io/${REPO_LC}:${VERSION}"
+          IMAGE="ghcr.io/${REPO_LC}"
 
-          # 预发布 (-rc / -beta / -alpha) **不能动 latest**, 否则按 latest 部署的人
-          # 会被悄悄拖到一个 rc 版本上去。
+          if git rev-parse -q --verify "refs/tags/${VTAG}" >/dev/null; then
+            echo "::error::tag ${VTAG} 已经存在。改 CHANGELOG.md 里的版本号, 或用 version 输入发一个别的号。"
+            exit 1
+          fi
+
           case "${VERSION}" in
             *-rc*|*-beta*|*-alpha*) PRERELEASE=true ;;
             *)                      PRERELEASE=false ;;
           esac
 
-          TAGS="${IMAGE}"
-          if [ "${PRERELEASE}" = false ]; then
-            TAGS="${TAGS}"$'\n'"ghcr.io/${REPO_LC}:latest"
+          # latest 只在**本次是最大版本**时才移动。
+          #
+          # 光看"是不是预发布"不够: 给 v0.9.0 发一个 hotfix 时, 那个判断会把
+          # latest 从已经发布的 v0.10.0 拽回 0.9.0, 而 latest 正是 NAS 上
+          # compose 默认拉的那个 —— 所有按 latest 部署的人会被静默降级。
+          HIGHEST="$(
+            { git tag -l 'v*'; echo "${VTAG}"; } \
+              | sed 's/^v//' \
+              | grep -E '^[0-9]+\.[0-9]+\.[0-9]+$' \
+              | sort -V | tail -1
+          )"
+          MOVE_LATEST=false
+          if [ "${PRERELEASE}" = false ] && [ "${HIGHEST}" = "${VERSION}" ]; then
+            MOVE_LATEST=true
           fi
+
+          TAGS="${IMAGE}:${VTAG}"
+          [ "${MOVE_LATEST}" = true ] && TAGS="${TAGS}"$'\n'"${IMAGE}:latest"
 
           {
             echo "version=${VERSION}"
+            echo "vtag=${VTAG}"
             echo "repo=${REPO_IN}"
-            echo "image=${IMAGE}"
+            echo "image=${IMAGE}:${VTAG}"
             echo "prerelease=${PRERELEASE}"
-            # 多行 output 必须用带定界符的写法, 直接 echo "tags=a\nb" 会被截断。
+            echo "move_latest=${MOVE_LATEST}"
             echo "tags<<__TAGS_EOF__"
             echo "${TAGS}"
             echo "__TAGS_EOF__"
           } >> "$GITHUB_OUTPUT"
 
-          echo "版本=${VERSION} 预发布=${PRERELEASE}"
+          echo "版本=${VERSION} 预发布=${PRERELEASE} 移动latest=${MOVE_LATEST} (现存最大=${HIGHEST})"
 
       - uses: docker/setup-qemu-action@v3
         with:
@@ -112,6 +130,7 @@ jobs:
       - uses: docker/setup-buildx-action@v3
 
       - uses: docker/login-action@v3
+        if: inputs.publish
         with:
           registry: ghcr.io
           username: ${{ github.actor }}
@@ -121,7 +140,7 @@ jobs:
         uses: docker/build-push-action@v6
         with:
           context: .
-          push: true
+          push: ${{ inputs.publish }}
           platforms: linux/amd64,linux/arm64
           # 前端那一段在 Dockerfile 里钉了 --platform=$BUILDPLATFORM, 所以
           # npm install + vite build 只在 amd64 runner 上原生跑一次, 不进 QEMU。
@@ -135,56 +154,100 @@ jobs:
           cache-from: type=gha
           cache-to: type=gha,mode=max
 
-      - name: 生成版本钉死的 compose.yml 和发布正文
+      - name: 确认镜像真的推上去了
+        if: inputs.publish
+        env:
+          IMG: ${{ steps.meta.outputs.image }}
+        run: |
+          set -euo pipefail
+          # build-push-action 成功不等于 registry 上真有这个 manifest (推送失败被
+          # 缓存层掩盖过)。回读一次, 顺便把两个架构都列出来存证。
+          docker buildx imagetools inspect "${IMG}" > /tmp/manifest.txt
+          cat /tmp/manifest.txt
+          for p in linux/amd64 linux/arm64; do
+            grep -q "$p" /tmp/manifest.txt || { echo "::error::${IMG} 里没有 $p"; exit 1; }
+          done
+          echo "✅ ${IMG} 已在 GHCR 上, 双架构齐全"
+
+      - name: 渲染两份 compose 与发布正文
+        id: notes
         env:
           V: ${{ steps.meta.outputs.version }}
+          VTAG: ${{ steps.meta.outputs.vtag }}
           IMG: ${{ steps.meta.outputs.image }}
           REPO: ${{ steps.meta.outputs.repo }}
+          MOVE_LATEST: ${{ steps.meta.outputs.move_latest }}
         run: |
           set -euo pipefail
           mkdir -p dist
-          # 源码版 docker-compose.yml 的 `build: .` 换成钉死版本的 image, 并加
-          # pull_policy: missing (只认本地已有镜像; 没有才拉, 有就用本地, 避免
-          # 升级时悄悄用旧的)。以前维护一份专门的 deploy/compose.release.yml
-          # 模板跟它保持一致, 现在直接从源头生成, 没有第二份文件可以跑偏。
-          sed "s|build: \.|image: ${IMG}\n    pull_policy: missing|" docker-compose.yml > dist/compose.yml
-          # 发布正文里的三个占位符
-          sed -e "s|__VERSION__|${V}|g" \
+          ./scripts/render-compose.sh "${IMG}" cli > dist/compose.yml
+          ./scripts/render-compose.sh "${IMG}" nas > dist/compose.nas.yml
+
+          # 渲染出来的东西必须自己是合法的, 否则发布页上那份是坏的。
+          docker compose -f dist/compose.yml     config -q
+          docker compose -f dist/compose.nas.yml config -q
+          # NAS 版的硬性要求: 非注释行里一个变量都不许剩 (图形界面不做插值)。
+          if grep -v '^\s*#' dist/compose.nas.yml | grep -q '\${'; then
+            echo "::error::compose.nas.yml 里还有没展开的变量"; exit 1
+          fi
+
+          sed -e "s|__VERSION__|${VTAG}|g" \
               -e "s|__IMAGE__|${IMG}|g" \
               -e "s|__REPO__|${REPO}|g" \
               .github/release-notes.md > dist/RELEASE_BODY.md
-          # 占位符必须一个不剩, 否则发布页会出现 __VERSION__ 这种东西
-          if grep -n '__VERSION__\|__IMAGE__\|__REPO__' dist/compose.yml dist/RELEASE_BODY.md; then
+
+          # 把两份 compose 的完整内容嵌进发布正文 —— 发布页要让人直接抄, 而不是
+          # 先下载一个文件再打开看。
+          {
+            echo
+            echo '### 完整 compose (命令行 + `.env`)'
+            echo
+            echo '```yaml'
+            cat dist/compose.yml
+            echo '```'
+            echo
+            echo '### 完整 compose (NAS 图形界面直接粘)'
+            echo
+            echo '这份不含任何 `${变量}`。QNAP Container Station / 群晖 Container Manager 的 YAML 输入框**不做变量插值**, 粘一份带变量的进去会以 `invalid reference format` 失败。'
+            echo
+            echo '```yaml'
+            cat dist/compose.nas.yml
+            echo '```'
+          } >> dist/RELEASE_BODY.md
+
+          if grep -n '__VERSION__\|__IMAGE__\|__REPO__' dist/RELEASE_BODY.md; then
             echo "::error::还有没替换掉的占位符" && exit 1
           fi
-          # compose.yml 自己必须是合法的 (拿它 config 一下; 缺 .env 不影响校验)
-          docker compose -f dist/compose.yml config -q
-          echo '✅ compose.yml 校验通过'
 
-      - name: 建 Release 并附上 compose.yml
+          # 同一份内容也进 Actions 的运行摘要, 不用点进 Release 就能看到。
+          cat dist/RELEASE_BODY.md >> "$GITHUB_STEP_SUMMARY"
+          echo '✅ 两份 compose 渲染并校验通过'
+
+      - name: 建 Release (顺带创建 tag) 并附上两份 compose
+        if: inputs.publish
         uses: softprops/action-gh-release@v2
         with:
-          tag_name: ${{ steps.meta.outputs.version }}
-          name: ${{ steps.meta.outputs.version }}
+          # tag 不需要事先存在 —— 这一步会在当前 commit 上创建它。
+          tag_name: ${{ steps.meta.outputs.vtag }}
+          target_commitish: ${{ github.sha }}
+          name: ${{ steps.meta.outputs.vtag }}
           body_path: dist/RELEASE_BODY.md
-          files: dist/compose.yml
+          files: |
+            dist/compose.yml
+            dist/compose.nas.yml
           draft: false
           prerelease: ${{ steps.meta.outputs.prerelease }}
+          make_latest: ${{ steps.meta.outputs.move_latest }}
 
       - name: 收尾提示
         env:
-          V: ${{ steps.meta.outputs.version }}
-          TAGS: ${{ steps.meta.outputs.tags }}
+          VTAG: ${{ steps.meta.outputs.vtag }}
+          IMG: ${{ steps.meta.outputs.image }}
+          MOVE_LATEST: ${{ steps.meta.outputs.move_latest }}
         run: |
-          {
-            echo "## 发布完成 ${V}"
-            echo
-            echo '推上去的镜像 tag:'
-            echo '```'
-            echo "${TAGS}"
-            echo '```'
-            echo
-            echo '> **第一次发布记得把包设成 Public**:'
-            echo '> Packages → 这个包 → Package settings → Change visibility → Public。'
-            echo '> 否则别人 `docker compose pull` 会拿到 `unauthorized`,必须先 `docker login ghcr.io`。'
-          } >> "$GITHUB_STEP_SUMMARY"
+          if [ "${{ inputs.publish }}" != "true" ]; then
+            echo "::notice::演练模式: 镜像与 compose 都构建校验过了, 但没有推送, 也没建 Release。"
+            exit 0
+          fi
+          echo "::notice::已发布 ${VTAG} —— 镜像 ${IMG}$([ "${MOVE_LATEST}" = true ] && echo ' (latest 已指向它)')"
+          echo "::notice::GHCR 包若是私有, NAS 上会 pull 报 unauthorized: 到包设置改成 Public, 或在 NAS 上 docker login ghcr.io"

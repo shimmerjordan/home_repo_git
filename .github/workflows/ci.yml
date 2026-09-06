@@ -10,7 +10,7 @@ on:
   workflow_call:      # release.yml 把这个当发布前的闸门复用
 
 # 同一 PR 连推两次不用等旧的跑完。group 里塞 github.workflow 是因为被 release.yml
-# 当闸门复用(workflow_call)时, github.workflow 取的是调用方("Release")而不是
+# 当闸门复用(workflow_call)时, github.workflow 取的是调用方("发布")而不是
 # "CI" —— 这样 PR/push 的正常 CI 运行和发布时的闸门运行天然落在不同 group, 不会互相取消。
 concurrency:
   group: ci-${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
