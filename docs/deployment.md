@@ -29,7 +29,8 @@ Release 页那份 `compose.yml` 的 `image` **钉死版本号**(发布流水线�
 
 | 变量 | 默认 | 说明 |
 |---|---|---|
-| `LAN_IP` | 空 | 局域网 IP,写进证书 SAN。可多个,空格/逗号分隔 |
+| `LAN_HOSTS` | 空 | 写进证书 SAN 的地址,IPv4 或主机名皆可,空格/逗号分隔多个。**NAS 上优先用主机名**(如 `nas.local`):IP 是 DHCP 发的会变,mDNS 名字不会 |
+| `LAN_IP` | 空 | 同上,`LAN_HOSTS` 的旧名字。`start.sh` 自动探测本机 IP 填这个 |
 | `HTTP_PORT` | `8080` | HTTP 端口 |
 | `APP_PORT` | `8443` | HTTPS 端口 |
 | `TZ` | `Asia/Shanghai` | 时区 |

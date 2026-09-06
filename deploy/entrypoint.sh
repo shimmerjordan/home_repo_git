@@ -36,18 +36,34 @@ if [ ! -f "$CA_KEY" ] || [ ! -f "$CA_CRT" ]; then
     -out "$CA_CRT"
 fi
 
-# 组装 SAN: 固定项 + 传入的 LAN_IP (空格/逗号分隔, 可多个)。
+# 组装 SAN: 固定项 + 传入的 LAN_HOSTS (空格/逗号分隔, 可多个)。
+#
+# IPv4 和主机名都收。**主机名是更好的选择**: 局域网 IP 多半是 DHCP 发的, 变一次
+# 就得改配置重签; 而 mDNS 名字 (QNAP/群晖 默认广播 <主机名>.local) 跟着设备走,
+# 填一次永久有效。iPad 原生支持 mDNS, 用 https://<主机名>.local:8443 即可。
+#
+# 认不出的条目会明确报出来而不是静默丢弃 —— 以前把 "192.168.x.x" 这种没替换的
+# 占位符原样填进去, 是悄悄被扔掉的, 用户只会看到 iPad 上依旧弹不安全, 无从查起。
 ALT="DNS.1=storage.local
 DNS.2=localhost
 IP.1=127.0.0.1"
-n=1
-for ip in $(echo "${LAN_IP:-}" | tr ',' ' '); do
-  # 只收形如 x.x.x.x 的 IPv4
-  case "$ip" in
-    *[!0-9.]*) continue ;;
-    *.*.*.*)   ALT="$ALT
-IP.$((n+1))=$ip"; n=$((n+1)) ;;
-  esac
+ipn=1
+dnsn=2
+for tok in $(echo "${LAN_HOSTS:-${LAN_IP:-}}" | tr ',' ' '); do
+  [ -n "$tok" ] || continue
+  if echo "$tok" | grep -qE '^[0-9]+(\.[0-9]+){3}$'; then
+    ipn=$((ipn + 1))
+    ALT="$ALT
+IP.$ipn=$tok"
+  elif echo "$tok" | grep -qE '^[A-Za-z0-9]([A-Za-z0-9-]*[A-Za-z0-9])?(\.[A-Za-z0-9]([A-Za-z0-9-]*[A-Za-z0-9])?)*$' \
+       && echo "$tok" | grep -qE '[A-Za-z]' \
+       && ! echo "$tok" | grep -qE '^[0-9.xX]+$'; then
+    dnsn=$((dnsn + 1))
+    ALT="$ALT
+DNS.$dnsn=$tok"
+  else
+    echo "[certs] !! 忽略 \"$tok\": 既不是 IPv4 也不是主机名 (占位符忘了替换?)"
+  fi
 done
 
 echo "[certs] 按当前地址签发服务器证书, SAN:"

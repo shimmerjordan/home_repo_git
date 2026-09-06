@@ -10,8 +10,14 @@ services:
       - LOG_DIR=/app/data/logs
       - CORS_ORIGINS=*
       - TZ=${TZ:-Asia/Shanghai}
-      # 局域网 IP(可空格/逗号分隔多个), 写进服务器证书 SAN, 让 iPad 用 https://<IP>:8443
-      # 装信任本地 CA 后零弹窗。由 start.sh 自动探测传入; 也可手动 export LAN_IP=...
+      # 写进服务器证书 SAN 的地址(空格/逗号分隔多个), 让 iPad 用 https://... 装信任
+      # 本地 CA 后零弹窗。IPv4 和主机名都收。
+      #
+      # **NAS 上优先填主机名**: 局域网 IP 多半是 DHCP 发的, 变一次就得改配置重签;
+      # 而 mDNS 名字(QNAP/群晖 默认广播 <主机名>.local)跟着设备走, 填一次永久有效。
+      #   LAN_HOSTS=nas.local        → https://nas.local:8443
+      # 本机开发时 start.sh 会自动探测 IP 塞进 LAN_IP, 不用管这两个。
+      - LAN_HOSTS=${LAN_HOSTS:-}
       - LAN_IP=${LAN_IP:-}
     ports:
       # HTTP 入口: 本机访问 / 下载 CA 证书 (http://<ip>:8080/ca.crt)
