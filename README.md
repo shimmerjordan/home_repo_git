@@ -20,12 +20,15 @@
 ```bash
 mkdir -p voice-storage && cd voice-storage
 curl -fLO https://github.com/shimmerjordan/home_repo_git/releases/latest/download/compose.yml
-printf 'LAN_IP=%s\n' "$(hostname -I | awk '{print $1}')" > .env   # iPad 走 HTTPS 用语音时要
+printf 'LAN_HOSTS=%s\n' "$(hostname).local" > .env   # iPad 走 HTTPS 用语音时要
 docker compose up -d
 ```
 
 打开 `http://<NAS-IP>:8080` → 设置页填 LLM API key → 开干。
-iPad 用语音走 `https://<NAS-IP>:8443`,装一次本地 CA 后零弹窗。
+iPad 用语音走 `https://<NAS-IP>:8443`,在设置页下载并信任本地 CA 后零弹窗。
+
+NAS 图形界面 (QNAP Container Station / 群晖 Container Manager) 用发布页上那份
+**compose.nas.yml**: 不含变量、只开 HTTPS 一个口, 可以整段粘进去。
 
 从源码编译、旧双容器版迁移、端口/环境变量、发版流程都在 [`docs/deployment.md`](docs/deployment.md)。
 

@@ -9,7 +9,7 @@
 ```bash
 mkdir -p voice-storage && cd voice-storage
 curl -fLO https://github.com/shimmerjordan/home_repo_git/releases/latest/download/compose.yml
-printf 'LAN_IP=%s\n' "$(hostname -I | awk '{print $1}')" > .env
+printf 'LAN_HOSTS=%s\n' "$(hostname).local" > .env
 docker compose up -d
 ```
 
@@ -89,10 +89,17 @@ curl -s localhost:8080/api/diag | head -c 300  # 物品/位置/流水条数应�
 
 - **HTTP 8080** — 日常访问,无证书弹窗。浏览器麦克风要求 secure context,所以 HTTP 下
   用不了语音(localhost 除外);文字输入、3D、群机器人都不受影响
-- **HTTPS 8443** — iPad / 手机用语音走这个。装一次本地根 CA 就彻底没弹窗:浏览器打开
-  `http://<IP>:8080/ca.crt` → 设置 → 通用 → VPN与设备管理 → 安装 → 关于本机 → 证书信任设置
-  → 打开完全信任;不装就点"高级 → 继续访问"。CA 只生成一次,服务器证书每次启动按 `LAN_IP`
-  重签(同一个 CA 签的,设备端不用重装,换 IP 也不用重装)
+- **HTTPS 8443** — iPad / 手机用语音走这个。装一次本地根 CA 就彻底没弹窗。
+
+  证书有两个入口,内容一样:**设置页 → 局域网语音访问 → 下载 CA 证书**,或直接访问
+  `/ca.crt`。两个入口在 HTTP 和 HTTPS 上都能用,所以只开 HTTPS 一个端口也能装证书
+  (发布页那份 `compose.nas.yml` 就是这么做的:先点过一次"不安全"警告,进设置页把证书
+  装上,之后就不再弹)。
+
+  装法:下载 → 设置 → 通用 → VPN与设备管理 → 安装 → 关于本机 → 证书信任设置 → 打开完全信任。
+
+  CA 只生成一次,服务器证书每次启动按 `LAN_HOSTS` 重签(同一个 CA 签的,设备端不用重装,
+  换地址也不用重装)
 
 nginx 和 uvicorn 由 supervisord 一起带起(`deploy/supervisord.conf`),`./start.sh logs`
 两个进程的日志都能看到;单独重启某一个:
@@ -150,7 +157,7 @@ git tag v0.8.0 && git push origin v0.8.0
 └── certs/
     ├── ca.crt       # 本地根 CA (装到 iPad 上的就是它, 存在就绝不重新生成)
     ├── ca.key
-    ├── server.crt   # 每次启动按当前 LAN_IP 重签, CA 不变所以设备无需重装
+    ├── server.crt   # 每次启动按当前 LAN_HOSTS 重签, CA 不变所以设备无需重装
     └── server.key
 ```
 

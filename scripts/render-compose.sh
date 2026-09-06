@@ -42,8 +42,22 @@ case "$MODE" in
 #   2. 卷路径 —— 默认写的是 /share/Container/...。**别放到 /share/Web 下**,
 #      那是 NAS Web 服务器的根目录, 会把 config.json (含 LLM api_key) 和
 #      certs/ca.key (本地 CA 私钥) 暴露到 HTTP 上。
-#   3. 端口 —— HTTP 用了 8081 而不是默认的 8080: QNAP QTS 管理界面就占着 8080。
-#      按你 NAS 上的实际占用挑一个没人用的。
+#   3. 端口 —— **只映射 HTTPS 8443 这一个**。项目默认还有个 HTTP 口 (8080),
+#      但它在 QNAP 上必然撞 QTS 管理界面, 而且单靠 HTTPS 也够用: 证书就在设置页
+#      里下, /ca.crt 走 HTTPS 一样能下 (content-type 已经是 iOS 认的那个)。
+#      少开一个口, 也就少一次端口冲突。
+#      8443 若在你 NAS 上被占了, 改成别的再粘, 先核一眼:
+#        netstat -tln | awk '{print $4}' | grep -oE '[0-9]+$' | sort -un
+#
+# 第一次访问会弹"不安全" —— 本地 CA 还没装到设备上, 这是预期的。点"高级/显示
+# 详细信息 → 继续访问", 进设置页 → 局域网语音访问 → 下载 CA 证书, 装好并信任
+# 之后就不再弹了。iOS 还要去 设置 → 通用 → 关于本机 → 证书信任设置 打开完全信任。
+#
+# 这份**不含 whisper 服务**。语音默认走浏览器自带的识别 (whisper_enabled 默认关),
+# 不装它一样能用。去掉的原因是 Container Station 不认 compose 的 profiles ——
+# 即使 whisper 挂着 profiles: ["whisper"] 没被激活, 它照样会去 Docker Hub 拉,
+# 而 registry-1.docker.io 在国内常年超时, 整个应用会因为这个可选服务创建失败。
+# 真要用本地 Whisper: 自己加回那个 service, 并给 Docker Hub 配镜像加速器。
 # ─────────────────────────────────────────────────────────────────────────
 HEADER
     # 依次: 展开 ${VAR:-default} → 删掉只有 start.sh 用的 LAN_IP 那行和它的说明 →
@@ -52,9 +66,10 @@ HEADER
       | sed -E 's/\$\{[A-Za-z_][A-Za-z0-9_]*:-([^}]*)\}/\1/g' \
       | sed -e '/本机开发时 start.sh 会自动探测/d' \
             -e '/^      - LAN_IP=$/d' \
-            -e 's|"8080:80"|"8081:80"|' \
-            -e 's|(http://<ip>:8080/ca.crt)|(http://<NAS>:8081/ca.crt)|' \
+            -e '/# HTTP 入口: 本机访问 \/ 下载 CA 证书/d' \
+            -e '/^      - "8080:80"$/d' \
             -e 's|\./data:/app/data|/share/Container/home_repo/data:/app/data|' \
+            -e '/^  whisper:/,/^    profiles: \["whisper"\]$/d' \
             -e 's|# certs 里的本地 CA 换了 iPad 就得重装, 所以别动这个路径。|# 换了这个路径等于换了一套 CA, iPad 上要重装证书 —— 定下来就别再改。|'
     ;;
   *)

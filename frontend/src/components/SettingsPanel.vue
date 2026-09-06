@@ -159,6 +159,20 @@ const wakeWordsText = computed({
 
 // 证书 / 安全访问: 是否已是安全环境 (https 或本机 localhost/127.0.0.1)。
 const isSecure = computed(() => typeof window !== 'undefined' && window.isSecureContext)
+
+// 说明文字里的地址一律**从当前页面现取**, 不写死端口。
+// 端口是可配的 (compose 里的 HTTP_PORT / APP_PORT), NAS 上通常还得避开自带服务,
+// 写死 8080/8443 的话, 凡是改过端口的人看到的说明都是错的。
+const here = computed(() => (typeof window === 'undefined' ? '' : window.location.origin))
+
+// 已经在 HTTPS 上就直接给当前地址; 在 HTTP 上则无从得知 HTTPS 映射到宿主机哪个
+// 端口 —— 容器里永远是 443, 映射关系只有 compose 知道。与其印一个可能是错的数字,
+// 不如明说要去哪儿查。
+const httpsTarget = computed(() => {
+  if (typeof window === 'undefined') return ''
+  if (window.location.protocol === 'https:') return window.location.origin
+  return `https://${window.location.hostname}:<compose 里映射到 443 的那个端口>`
+})
 </script>
 
 <template>
@@ -357,7 +371,7 @@ const isSecure = computed(() => typeof window !== 'undefined' && window.isSecure
       <div class="text-xs text-slate-500 leading-relaxed">
         浏览器只在安全环境下才允许网页开麦克风。本机 (localhost / 127.0.0.1) 走 HTTP 就行;
         但 <b>iPad / 手机用局域网 IP 访问时必须走 HTTPS</b> (Safari 对局域网 IP 无 HTTP 豁免)。
-        下载并信任本机自建的 CA 证书后, 访问 <code>https://&lt;本机IP&gt;:8443</code> 即可, 不再弹"不安全"。
+        下载并信任本机自建的 CA 证书后, 访问 <code>{{ httpsTarget }}</code> 即可, 不再弹"不安全"。
       </div>
       <div>
         <a :href="'/ca.crt'" class="btn btn-primary inline-block" target="_blank" rel="noopener">
@@ -367,10 +381,10 @@ const isSecure = computed(() => typeof window !== 'undefined' && window.isSecure
       <div class="text-xs text-slate-500 leading-relaxed border-t pt-3">
         <b>iPad / iPhone 安装步骤 (一次性):</b>
         <ol class="list-decimal ml-4 mt-1 space-y-0.5">
-          <li>用设备的 <b>Safari</b> 打开本页并点上面的下载按钮 (或直接访问 <code>http://&lt;本机IP&gt;:8080/ca.crt</code>)</li>
+          <li>用设备的 <b>Safari</b> 打开本页并点上面的下载按钮 (或直接访问 <code>{{ here }}/ca.crt</code>)</li>
           <li>设置 → 通用 → <b>VPN 与设备管理</b> → 安装刚下载的描述文件</li>
           <li>设置 → 通用 → 关于本机 → <b>证书信任设置</b> → 打开对 "Voice Storage Local CA" 的完全信任</li>
-          <li>之后访问 <code>https://&lt;本机IP&gt;:8443</code> 无警告, 语音可用</li>
+          <li>之后访问 <code>{{ httpsTarget }}</code> 无警告, 语音可用</li>
         </ol>
         <div class="mt-2">
           当前访问环境:
