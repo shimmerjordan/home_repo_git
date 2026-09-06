@@ -31,6 +31,14 @@ on:
         description: 'GitHub Release 标记为预发布?'
         type: boolean
         default: false
+      on_conflict:
+        description: '这个版本号已经发过了怎么办'
+        type: choice
+        options:
+          - pre          # 自动加 -pre.N 发一个新的 (默认, 不动已发布的东西)
+          - overwrite    # 覆盖: tag 移到当前 commit, Release 与镜像 tag 一并顶掉
+          - fail         # 直接失败
+        default: pre
 
 # 一次发布跑到一半不该被顶掉 —— 中途取消会留下半成品镜像 tag / Release。
 # 撞车时排队等前一个跑完。
@@ -80,15 +88,16 @@ jobs:
           REPO_LC="$(echo "${REPO_IN}" | tr '[:upper:]' '[:lower:]')"
           IMAGE="ghcr.io/${REPO_LC}"
 
-          if git rev-parse -q --verify "refs/tags/${VTAG}" >/dev/null; then
-            echo "::error::tag ${VTAG} 已经存在。改 CHANGELOG.md 里的版本号, 或用 version 输入发一个别的号。"
-            exit 1
-          fi
-
-          case "${VERSION}" in
-            *-rc*|*-beta*|*-alpha*) PRERELEASE=true ;;
-            *)                      PRERELEASE=false ;;
-          esac
+          # 版本号冲突怎么处理, 抽在 scripts/resolve-version.sh 里 —— 四个仓库
+          # (repo_git / explore_journal / photo-ar / cc-trans) 用的是同一份逻辑,
+          # 内联进 workflow 的话必然各改各的。
+          # 不用 eval: 那是对脚本输出做求值, 而输出里的值来自 git tag 名。
+          # 显式取四个键, 多几行换掉一个没必要的注入面。
+          RV="$(./scripts/resolve-version.sh "${VERSION}" "${{ inputs.on_conflict }}")"
+          VERSION="$(printf '%s\n' "$RV" | sed -n 's/^version=//p')"
+          VTAG="$(printf '%s\n' "$RV" | sed -n 's/^vtag=//p')"
+          PRERELEASE="$(printf '%s\n' "$RV" | sed -n 's/^prerelease=//p')"
+          OVERWRITE="$(printf '%s\n' "$RV" | sed -n 's/^overwrite=//p')"
 
           # latest 只在**本次是最大版本**时才移动。
           #
@@ -116,6 +125,7 @@ jobs:
             echo "image=${IMAGE}:${VTAG}"
             echo "prerelease=${PRERELEASE}"
             echo "move_latest=${MOVE_LATEST}"
+            echo "overwrite=${OVERWRITE}"
             echo "tags<<__TAGS_EOF__"
             echo "${TAGS}"
             echo "__TAGS_EOF__"
@@ -222,6 +232,18 @@ jobs:
           # 同一份内容也进 Actions 的运行摘要, 不用点进 Release 就能看到。
           cat dist/RELEASE_BODY.md >> "$GITHUB_STEP_SUMMARY"
           echo '✅ 两份 compose 渲染并校验通过'
+
+      - name: "覆盖模式: 把 tag 移到当前 commit"
+        # action-gh-release 遇到已存在的 tag 只会更新 Release, **不会移动 tag** ——
+        # 那样资产是新的、tag 还指着旧 commit, 对不上。所以这里显式挪一次。
+        if: inputs.publish && steps.meta.outputs.overwrite == 'true'
+        env:
+          VTAG: ${{ steps.meta.outputs.vtag }}
+        run: |
+          set -euo pipefail
+          git tag -f "${VTAG}" "${GITHUB_SHA}"
+          git push -f origin "refs/tags/${VTAG}"
+          echo "已把 ${VTAG} 移到 ${GITHUB_SHA}"
 
       - name: 建 Release (顺带创建 tag) 并附上两份 compose
         if: inputs.publish
