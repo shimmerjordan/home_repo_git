@@ -37,7 +37,7 @@ export const FURNITURE_CATALOG = [
   { kind: 'shower',   label: '淋浴',   icon: '🚿', w: 0.9,  h: 2.0,  d: 0.9,  color: '#bae6fd', container: false, levels: 0, placement: 'inside' },
   { kind: 'tv',       label: '电视',   icon: '📺', w: 1.3,  h: 0.80, d: 0.10, color: '#0f172a', container: false, levels: 0, placement: 'top' },
   { kind: 'ac',       label: '空调',   icon: '❄️', w: 0.85, h: 0.30, d: 0.20, color: '#f1f5f9', container: false, levels: 0, placement: 'inside' },
-  { kind: 'microwave',label: '微波炉', icon: '🍱', w: 0.5,  h: 0.30, d: 0.40, color: '#475569', container: false, levels: 0, placement: 'top' },
+  { kind: 'microwave',label: '微波炉', icon: '🍿', w: 0.5,  h: 0.30, d: 0.40, color: '#475569', container: false, levels: 0, placement: 'top' },
 ]
 
 const KIND_DEFAULTS = Object.fromEntries(
@@ -48,6 +48,25 @@ KIND_DEFAULTS.other = { w: 0.6, h: 0.6, d: 0.6, color: '#64748b', levels: 0 }
 export function catalogFor(kind) {
   return FURNITURE_CATALOG.find((c) => c.kind === kind) || null
 }
+
+// 位置的展示图标。全站唯一一份 —— 位置树、文件夹视图、2D/3D 画布都从这里取。
+// 以前位置页各自抄了一份只有五六种的表, 于是冰箱、衣柜、书桌、洗衣机在位置树里
+// 一律显示成 📍。
+export function iconFor(kind) {
+  return catalogFor(kind)?.icon || '📍'
+}
+
+// 类型下拉的选项。直接由目录派生, 新增一种家具就自动出现在位置页的类型选择里,
+// 不会再出现"3D 页能建冰箱、位置页却改不成冰箱"这种两边不同步。
+// `other` 不在目录里 (它没有几何默认值, 是老数据的兜底 kind), 单独补在末尾。
+export const KIND_OPTIONS = [
+  ...FURNITURE_CATALOG.map((c) => ({
+    value: c.kind,
+    icon: c.icon,
+    label: c.kind === 'home' ? `${c.label} (顶层)` : c.label,
+  })),
+  { value: 'other', icon: '📍', label: '其他' },
+]
 
 function defaultsFor(kind) {
   return KIND_DEFAULTS[kind] || KIND_DEFAULTS.other

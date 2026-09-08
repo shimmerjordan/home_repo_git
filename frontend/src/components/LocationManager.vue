@@ -3,7 +3,7 @@
 // a single modal with all editable attributes.
 import { ref, computed, onMounted, watch } from 'vue'
 import { api } from '../api'
-import { effectiveGeometry } from '../composables/sceneLayout'
+import { effectiveGeometry, iconFor, KIND_OPTIONS } from '../composables/sceneLayout'
 import LevelSlotFields from './LevelSlotFields.vue'
 import { useInventoryStore } from '../composables/useInventoryStore'
 
@@ -100,24 +100,6 @@ function descendantCount(locId) {
   for (const it of items.value) if (it.location_id && set.has(it.location_id)) cnt++
   return cnt
 }
-
-const KIND_OPTIONS = [
-  { value: 'home',     label: '🏡 家 (顶层)' },
-  { value: 'room',     label: '🏠 房间' },
-  { value: 'shelf',    label: '📚 书架' },
-  { value: 'cabinet',  label: '🗄 柜子' },
-  { value: 'wardrobe', label: '👔 衣柜' },
-  { value: 'drawer',   label: '🗃 抽屉柜' },
-  { value: 'box',      label: '📦 收纳箱' },
-  { value: 'desk',     label: '🖥 书桌' },
-  { value: 'table',    label: '🍽 桌子' },
-  { value: 'bed',      label: '🛏 床' },
-  { value: 'sofa',     label: '🛋 沙发' },
-  { value: 'chair',    label: '🪑 椅子' },
-  { value: 'plant',    label: '🪴 盆栽' },
-  { value: 'other',    label: '📍 其他' },
-]
-const KIND_ICON = Object.fromEntries(KIND_OPTIONS.map((o) => [o.value, o.label.split(' ')[0]]))
 
 async function createFolder() {
   const name = prompt('新文件夹名称')
@@ -262,7 +244,7 @@ function up() {
         <template v-for="b in breadcrumbs" :key="b.id">
           <span class="text-slate-400">/</span>
           <button class="hover:underline" @click="cwdId = b.id">
-            {{ KIND_ICON[b.kind] || '📁' }} {{ b.name }}
+            {{ iconFor(b.kind) }} {{ b.name }}
           </button>
         </template>
       </nav>
@@ -288,7 +270,7 @@ function up() {
                   @click.stop="openEdit(c)">⚙</button>
           <!-- Whole card is the navigation target -->
           <button class="block w-full cursor-pointer" @click="enter(c)" @dblclick="enter(c)">
-            <div class="text-3xl text-center pt-1">{{ KIND_ICON[c.kind] || '📁' }}</div>
+            <div class="text-3xl text-center pt-1">{{ iconFor(c.kind) }}</div>
             <div class="text-sm text-center font-medium truncate mt-1 px-1">{{ c.name }}</div>
             <div class="text-xs text-center text-slate-400 mt-0.5">
               {{ descendantCount(c.id) }} 件 · {{ (childrenOf.get(c.id) || []).length }} 子
@@ -324,7 +306,7 @@ function up() {
       <div class="relative card p-5 w-full max-w-lg space-y-3">
         <div class="flex items-center justify-between">
           <div class="font-semibold text-base">
-            {{ KIND_ICON[editing.kind] || '📁' }} 编辑属性
+            {{ iconFor(editing.kind) }} 编辑属性
             <span class="text-xs text-slate-500 ml-2 font-normal">{{ editing.full_path }}</span>
           </div>
           <button class="text-slate-400 hover:text-slate-700 text-lg leading-none" @click="closeEdit">✕</button>
@@ -345,7 +327,7 @@ function up() {
             <div>
               <label class="label">类型</label>
               <select v-model="editForm.kind" class="input">
-                <option v-for="o in KIND_OPTIONS" :key="o.value" :value="o.value">{{ o.label }}</option>
+                <option v-for="o in KIND_OPTIONS" :key="o.value" :value="o.value">{{ o.icon }} {{ o.label }}</option>
               </select>
             </div>
           </div>

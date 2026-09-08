@@ -1,5 +1,6 @@
 <script setup>
 import { ref } from 'vue'
+import { iconFor } from '../composables/sceneLayout'
 
 defineOptions({ name: 'LocationTreeNode' })
 
@@ -12,7 +13,6 @@ const props = defineProps({
 const emit = defineEmits(['select'])
 
 const open = ref(true)
-const KIND_ICON = { room: '🏠', shelf: '📚', drawer: '🗄️', box: '📦', other: '📍' }
 </script>
 
 <template>
@@ -29,7 +29,7 @@ const KIND_ICON = { room: '🏠', shelf: '📚', drawer: '🗄️', box: '📦',
                  selectedId === node.id ? 'bg-slate-900 text-white' : 'hover:bg-slate-100']"
         :style="{ paddingLeft: 4 + depth * 14 + 'px' }"
         @click="emit('select', node.id)">
-        <span>{{ KIND_ICON[node.kind] || '📍' }} {{ node.name }}</span>
+        <span>{{ iconFor(node.kind) }} {{ node.name }}</span>
         <span class="text-xs opacity-70">{{ counts[node.id] || '' }}</span>
       </button>
     </div>

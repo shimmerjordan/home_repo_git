@@ -37,7 +37,7 @@ const total = computed(() => Object.values(props.itemCounts).reduce((a, b) => a 
       :class="['w-full text-left px-2 py-1.5 rounded flex items-center justify-between',
                selectedId === null ? 'bg-slate-900 text-white' : 'hover:bg-slate-100']"
       @click="emit('select', null)">
-      <span>📦 全部物品</span>
+      <span>🗂 全部物品</span>
       <span class="text-xs opacity-70">{{ total }}</span>
     </button>
     <button
