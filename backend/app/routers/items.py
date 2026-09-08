@@ -400,6 +400,10 @@ recent_router = APIRouter(prefix="/api/transactions", tags=["transactions"])
 @recent_router.get("", response_model=list[schemas.TransactionOut])
 def recent_transactions(
     limit: int = Query(50, ge=1, le=2000),
+    # 前端「近期取放记录」按页取数, 每页只拉 limit 条 —— 每 30s 轮询一次,
+    # 让载荷跟着页码涨是白付的开销。有没有下一页由前端多要 1 条前瞻判断,
+    # 所以这里不需要再算 total。
+    offset: int = Query(0, ge=0),
     q: str | None = Query(None, description="按物品名搜索"),
     action: str | None = Query(None, pattern="^(take_out|put_in|adjust|consume)$"),
     location_id: int | None = Query(None),
@@ -437,7 +441,9 @@ def recent_transactions(
             query = query.filter(models.Transaction.created_at <= dt)
         except ValueError:
             pass
-    rows = query.order_by(models.Transaction.created_at.desc()).limit(limit).all()
+    rows = (query.order_by(models.Transaction.created_at.desc(),
+                          models.Transaction.id.desc())
+            .offset(offset).limit(limit).all())
     return annotate_undoable(db, [serialize_transaction(r) for r in rows])
 
 

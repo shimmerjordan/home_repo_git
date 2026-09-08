@@ -10,6 +10,8 @@ import PlanReview from './PlanReview.vue'
 import { isLowEndDevice } from '../composables/sceneLayout'
 import { useInventoryStore } from '../composables/useInventoryStore'
 import { usePausablePoll } from '../composables/usePausablePoll'
+import { usePagedList, readPageSize, writePageSize } from '../composables/usePagedList'
+import Pager from './Pager.vue'
 
 // three.js (~600 KB) is only pulled in through Scene3D, and here it renders solely once a
 // saved 3D layout exists. Load it on demand so the default voice view stays light.
@@ -112,7 +114,34 @@ const pendingAnswer = ref(null) // function(boolean)
 const confirmPrompt = ref('')
 const confirmDetail = ref('')
 
-async function loadRecent() { try { recentTx.value = await api.recentTx(15) } catch {} }
+// 近期取放记录走**服务端**分页 (/api/transactions 的 offset)。这一段每 30s 轮询
+// 一次, 一次只拉当前页那几条; 若改成一次性拉几百条再在前端切片, 翻页越深载荷越
+// 大, 而轮询是白付的。总条数不查 —— 多要 1 条就够判断有没有下一页了。
+const RECENT_KEY = 'recent'
+const recentPage = ref(1)
+const recentPageSize = ref(readPageSize(RECENT_KEY, 10))
+const recentHasNext = ref(false)
+
+async function loadRecent() {
+  const size = recentPageSize.value
+  try {
+    const rows = await api.recentTx(size + 1, (recentPage.value - 1) * size)
+    recentHasNext.value = rows.length > size
+    recentTx.value = rows.slice(0, size)
+    // 停在一个已经被删空的页上只会看到"暂无", 自动退回上一页。
+    if (!recentTx.value.length && recentPage.value > 1) {
+      recentPage.value -= 1
+      await loadRecent()
+    }
+  } catch {}
+}
+function setRecentPage(n) { recentPage.value = Math.max(1, n); loadRecent() }
+function setRecentPageSize(n) {
+  recentPageSize.value = n
+  writePageSize(RECENT_KEY, n)
+  recentPage.value = 1
+  loadRecent()
+}
 
 // 3D scene data + highlight target — driven by search/voice result.
 const sceneLocations = ref([])
@@ -161,6 +190,18 @@ const depletedItems = ref([])
 async function loadDepleted() {
   try { depletedItems.value = await api.depletedItems() } catch {}
 }
+
+// 这两份提醒列表接口是整份返回的 (没有分页参数), 所以在前端切片就够了。
+// 解构成顶层 ref —— 模板只对 <script setup> 的顶层 ref 自动解包, 挂在普通对象上
+// 的 ref 得一路写 .value。
+const {
+  page: depletedPage, pageSize: depletedPageSize,
+  total: depletedTotal, pageCount: depletedPageCount, slice: depletedSlice,
+} = usePagedList(depletedItems, 'depleted')
+const {
+  page: pendingPage, pageSize: pendingPageSize,
+  total: pendingTotal, pageCount: pendingPageCount, slice: pendingSlice,
+} = usePagedList(pendingReturns, 'pending')
 
 async function deleteDepleted(it) {
   if (!confirm(`确认从数据库永久删除「${it.name}」?这条物品记录会消失,审计日志会保留。`)) return
@@ -939,8 +980,8 @@ const inConfirm = computed(() => phase.value === 'confirm-text' || phase.value =
       <div class="text-xs text-slate-600 mb-2">
         库存归零, 搜索和 3D 都不再显示。还会买点 <b>补货</b>,不要了点 <b>永久删除</b>。
       </div>
-      <ul class="divide-y divide-rose-200">
-        <li v-for="it in depletedItems" :key="it.id" class="py-2 flex items-center gap-2 text-sm flex-wrap">
+      <ul class="divide-y divide-rose-200 max-h-[45vh] overflow-y-auto">
+        <li v-for="it in depletedSlice" :key="it.id" class="py-2 flex items-center gap-2 text-sm flex-wrap">
           <span class="font-medium">{{ it.name }}</span>
           <span v-if="it.aliases" class="text-xs text-slate-400">({{ it.aliases }})</span>
           <span class="text-xs text-slate-500 truncate flex-1 min-w-0">
@@ -950,6 +991,9 @@ const inConfirm = computed(() => phase.value === 'confirm-text' || phase.value =
           <button class="btn btn-danger text-xs" @click="deleteDepleted(it)" title="从数据库永久删除">🗑 永久删除</button>
         </li>
       </ul>
+      <Pager :page="depletedPage" :page-size="depletedPageSize"
+             :page-count="depletedPageCount" :total="depletedTotal"
+             @update:page="depletedPage = $event" @update:page-size="depletedPageSize = $event" />
     </div>
 
     <!-- Pending returns (借出未归位) — surfaced prominently above the recent
@@ -965,8 +1009,8 @@ const inConfirm = computed(() => phase.value === 'confirm-text' || phase.value =
       <div class="text-xs text-slate-600 mb-2">
         已借出未归位。放回去了点"已归位",用完/扔了点"已用完"。
       </div>
-      <ul class="divide-y divide-amber-200">
-        <li v-for="p in pendingReturns" :key="p.item_id" class="py-2 flex items-center gap-2 text-sm flex-wrap">
+      <ul class="divide-y divide-amber-200 max-h-[45vh] overflow-y-auto">
+        <li v-for="p in pendingSlice" :key="p.item_id" class="py-2 flex items-center gap-2 text-sm flex-wrap">
           <span class="font-medium">{{ p.item_name }}</span>
           <span class="font-mono text-slate-600">×{{ p.pending_quantity }}</span>
           <span class="text-xs text-slate-500 truncate flex-1 min-w-0">
@@ -976,6 +1020,9 @@ const inConfirm = computed(() => phase.value === 'confirm-text' || phase.value =
           <button class="btn btn-secondary text-xs" @click="markConsumed(p)" title="已经用完了/扔了/送人了, 不会再归位">⊗ 已用完</button>
         </li>
       </ul>
+      <Pager :page="pendingPage" :page-size="pendingPageSize"
+             :page-count="pendingPageCount" :total="pendingTotal"
+             @update:page="pendingPage = $event" @update:page-size="pendingPageSize = $event" />
     </div>
 
     <!-- Recent transactions -->
@@ -988,7 +1035,7 @@ const inConfirm = computed(() => phase.value === 'confirm-text' || phase.value =
         </div>
       </div>
       <div v-if="!recentTx.length" class="text-sm text-slate-400 py-4 text-center">暂无</div>
-      <ul v-else class="divide-y divide-slate-100">
+      <ul v-else class="divide-y divide-slate-100 max-h-[60vh] overflow-y-auto">
         <li v-for="t in recentTx" :key="t.id" class="py-2 flex items-center gap-3 text-sm">
           <span :class="['tag', txClass[t.action] || 'bg-slate-100 text-slate-700']">
             {{ txLabel[t.action] || t.action }}
@@ -1010,6 +1057,8 @@ const inConfirm = computed(() => phase.value === 'confirm-text' || phase.value =
                             @done="onQuickActionDone" />
         </li>
       </ul>
+      <Pager :page="recentPage" :page-size="recentPageSize" :page-count="null" :has-next="recentHasNext"
+             @update:page="setRecentPage" @update:page-size="setRecentPageSize" />
     </div>
   </div>
 </template>

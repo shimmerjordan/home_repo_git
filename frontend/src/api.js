@@ -42,7 +42,7 @@ export const api = {
   },
   recordTx: (id, data) =>
     request(`/api/items/${id}/transactions`, { method: 'POST', body: JSON.stringify(data) }),
-  recentTx: (limit = 50) => request(`/api/transactions?limit=${limit}`),
+  recentTx: (limit = 50, offset = 0) => request(`/api/transactions?limit=${limit}&offset=${offset}`),
   pendingReturns: () => request('/api/transactions/pending-returns'),
   depletedItems: () => request('/api/items/depleted'),
   searchTx: (params = {}) => request(`/api/transactions${qs(params)}`),
