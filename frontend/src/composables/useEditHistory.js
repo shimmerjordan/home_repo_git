@@ -8,6 +8,11 @@
 //                                                   → undo: PATCH back to before
 //   { kind: 'delete', id, payload: <LocationCreate> }
 //                                                   → undo: recreate (NEW id; children orphans warned)
+//   { kind: 'batch', label, updates: [{ id, patch, before }] }
+//                                                   → undo: PATCH every id back, as ONE step
+//
+// batch 存在的理由: 「本层排开」一次要挪一层里的每一个子级。逐条 applyEdit 会压进
+// N 条历史, 用户得连按 N 次撤销才回得去 —— 一个动作就该只对应一次撤销。
 //
 // Only single-level undo per action; redo is intentionally omitted (delete+recreate
 // changes ids and we don't want to maintain id-remap).
@@ -28,6 +33,7 @@ export function useEditHistory() {
     if (a.type === 'create') return `创建"${a.name || a.kind || ''}"`
     if (a.type === 'update') return `修改"${a.before?.name || ''}"`
     if (a.type === 'delete') return `删除"${a.payload?.name || ''}"`
+    if (a.type === 'batch') return a.label || '批量修改'
     return '操作'
   }
 
@@ -56,6 +62,31 @@ export function useEditHistory() {
         cap()
         return null
       }
+      if (action.kind === 'batch') {
+        const updates = action.updates || []
+        if (!updates.length) return null
+        if (updates.some((u) => !u.before)) {
+          throw new Error('batch action requires a `before` snapshot per update')
+        }
+        // 串行发 —— 后端是 SQLite 单写, 并发 PATCH 只会互相等锁。
+        const done = []
+        try {
+          for (const u of updates) {
+            await api.updateLocation(u.id, u.patch)
+            done.push(u)
+          }
+        } catch (e) {
+          // 中途失败: 已经成功的那几条仍然要能撤, 否则布局停在半改状态且撤不回去。
+          if (done.length) {
+            stack.value.push({ type: 'batch', label: action.label, updates: done })
+            cap()
+          }
+          throw e
+        }
+        stack.value.push({ type: 'batch', label: action.label, updates: done })
+        cap()
+        return null
+      }
       throw new Error('unknown action kind: ' + action.kind)
     } catch (e) {
       lastError.value = String(e.message || e)
@@ -80,6 +111,10 @@ export function useEditHistory() {
         await api.updateLocation(a.id, a.before).catch(() => {})
       } else if (a.type === 'delete') {
         await api.createLocation(a.payload).catch(() => {})
+      } else if (a.type === 'batch') {
+        for (const u of a.updates || []) {
+          await api.updateLocation(u.id, u.before).catch(() => {})
+        }
       }
     } finally {
       busy.value = false

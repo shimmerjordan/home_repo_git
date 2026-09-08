@@ -153,6 +153,144 @@ const itemCountByLoc = computed(() => {
   return out
 })
 
+// ---- 分层显示 (Level focus) ----
+// 俯视图里 `level` 只影响高度, 不影响 x/z (见 sceneLayout.buildWorldMap) —— 一个
+// 3 层柜子每层放 4 个收纳箱, 在 2D 上就是 4 摞、每摞 3 个精确重叠: 点不中、拖不
+// 动、外部标签也糊成一团。选中容器后就能只盯一层, 其余层退成底图。
+const focusLevel = ref(0)          // 0 = 全部层
+
+// 层筛选挂在哪个容器上: 选中的位置自己有层就是它自己; 否则往上看一级 —— 选中柜子
+// 里某个收纳箱时, 用户想筛的显然是那个柜子, 而不是收纳箱。
+const levelHost = computed(() => {
+  const sel = props.locations.find((l) => l.id === props.selectedId)
+  if (!sel) return null
+  const own = effectiveGeometry(sel)
+  if (own.levels >= 2) return { loc: sel, geo: own }
+  const parent = sel.parent_id ? props.locations.find((l) => l.id === sel.parent_id) : null
+  if (!parent) return null
+  const pg = effectiveGeometry(parent)
+  return pg.levels >= 2 ? { loc: parent, geo: pg } : null
+})
+
+// 每层几个子级 —— 直接写进层按钮里, 不用逐层点开才知道哪层是空的。
+const levelCounts = computed(() => {
+  const out = {}
+  const host = levelHost.value
+  if (!host) return out
+  for (const l of props.locations) {
+    if (l.parent_id !== host.loc.id) continue
+    const lv = +l.geometry?.level || 0
+    out[lv] = (out[lv] || 0) + 1
+  }
+  return out
+})
+
+// 换了容器就退回"全部" —— 上一个柜子的"第3层"对新柜子没有意义。
+watch(() => levelHost.value?.loc.id, () => { focusLevel.value = 0 })
+
+// 当前被压成底图的 id 集合。注意要连**整棵子树**一起压: 只压直接子级的话,
+// 它里面的收纳箱还是实色, 照样叠在当前层上面。
+const dimmedIds = computed(() => {
+  const out = new Set()
+  const host = levelHost.value
+  if (!host || !focusLevel.value) return out
+  const kidsOf = new Map()
+  for (const l of props.locations) {
+    const k = l.parent_id || 0
+    if (!kidsOf.has(k)) kidsOf.set(k, [])
+    kidsOf.get(k).push(l)
+  }
+  const stack = []
+  for (const c of kidsOf.get(host.loc.id) || []) {
+    if ((+c.geometry?.level || 0) !== focusLevel.value) stack.push(c.id)
+  }
+  while (stack.length) {
+    const id = stack.pop()
+    if (out.has(id)) continue          // 兼作环保护
+    out.add(id)
+    for (const c of kidsOf.get(id) || []) stack.push(c.id)
+  }
+  return out
+})
+function isDimmed(id) { return dimmedIds.value.has(id) }
+
+// 选中某一层里的箱子后又切到别的层, 选中项会跟着变成底图 —— 看不见、点不动, 属性
+// 面板却还开着它, 很懵。这种时候把选中上移到容器本身。
+// 不会来回抖: 容器自己有层, 所以 levelHost 还是它, host id 没变, focusLevel 不重置。
+watch(dimmedIds, (ids) => {
+  if (props.selectedId && ids.has(props.selectedId)) {
+    emit('select', levelHost.value?.loc.id ?? null)
+  }
+})
+
+// 标签避让: 同一层里靠在一起的窄物件, 外部标签会横向叠住。按 x 区间贪心分配行号,
+// 冲突的往下错一行。只是启发式 —— 宽度按字数估, 够用就行。
+const LABEL_LINE = 0.20            // 一行标签占的高度 (m)
+// 行数上限。标签比它标注的箱子宽得多 (一个 0.25m 的收纳箱, 标签能有 2m), 所以哪怕
+// 已经"排开"过, 一层里四五个箱子的标签还是全撞在一起 —— 只给 3 行的话多出来的会挤
+// 回最后一行, 等于没避让。给到 6 行, 一层塞六个以内都能各占一行。
+const LABEL_MAX_ROWS = 6
+const labelRow = computed(() => {
+  const rows = []                  // rows[i] = 已占用的 [x0, x1, z] 区间
+  const out = {}
+  const cands = renderables.value
+    .filter((r) => !r.isRoom && !dimmedIds.value.has(r.id))
+    .map((r) => {
+      let n = (r.label || '').length
+      if (r.levels >= 2) n += 4
+      else if (r.level) n += 4
+      if (itemCountByLoc.value[r.id]) n += 4
+      const w = Math.max(0.3, n * 0.16 * 0.9)
+      return { id: r.id, x: r.x, z: r.z + r.d / 2, w }
+    })
+    .sort((a, b) => (a.z - b.z) || (a.x - b.x))
+  for (const c of cands) {
+    let row = 0
+    for (; row < LABEL_MAX_ROWS; row++) {
+      const used = rows[row] || (rows[row] = [])
+      // 只有"上下也挨着"才算撞 —— 房间两头的两个标签 x 区间重叠也互不影响。
+      const hit = used.some((u) =>
+        Math.abs(u.z - c.z) < LABEL_LINE * 1.5 &&
+        c.x - c.w / 2 < u.x1 + 0.05 && c.x + c.w / 2 > u.x0 - 0.05)
+      if (!hit) { used.push({ x0: c.x - c.w / 2, x1: c.x + c.w / 2, z: c.z }); break }
+    }
+    out[c.id] = Math.min(row, LABEL_MAX_ROWS - 1)   // 再排不下就认了, 别无限往下堆
+  }
+  return out
+})
+
+// 把当前层的子级按顺序沿父级宽度排满 (写 slot, 由 buildWorldMap 换算成 x)。
+// 一次 batch, 所以只占一步撤销。
+async function spreadCurrentLevel() {
+  const host = levelHost.value
+  if (!host || !focusLevel.value) return
+  const kids = props.locations
+    .filter((l) => l.parent_id === host.loc.id
+      && (+l.geometry?.level || 0) === focusLevel.value)
+    .sort((a, b) => {
+      // 按当前视觉位置排, 用户看到的左右顺序不会被打乱。
+      const ax = worldMap.value.get(a.id)?.x ?? 0
+      const bx = worldMap.value.get(b.id)?.x ?? 0
+      return ax - bx || a.id - b.id
+    })
+  if (kids.length < 2) return
+  const totalW = kids.reduce((sum, k) => sum + effectiveGeometry(k).w, 0)
+  if (totalW > host.geo.w + 1e-6
+      && !confirm(`第 ${focusLevel.value} 层这 ${kids.length} 件加起来 ${totalW.toFixed(2)}m, `
+                  + `比"${host.loc.name}"的 ${host.geo.w.toFixed(2)}m 还宽, 排开后会顶出去。继续?`)) {
+    return
+  }
+  const updates = kids.map((k, i) => ({
+    id: k.id,
+    // 只动 slot, 其余存了什么原样带回去 (effectiveGeometry 会掺进 _set / polygon:null
+    // 这类派生字段, 不能直接摊进 patch)。x 由 buildWorldMap 从 slot 现算。
+    patch: { geometry: { ...(k.geometry || {}), slot: i + 1 } },
+    before: props.snapshot(k),
+  }))
+  await props.applyEdit({ kind: 'batch', label: `排开"${host.loc.name}"第${focusLevel.value}层`, updates })
+  emit('changed')
+}
+
 function svgPoint(ev) {
   if (!svgRef.value) return { x: 0, z: 0 }
   const pt = svgRef.value.createSVGPoint()
@@ -177,6 +315,9 @@ function findNearestShape(p) {
   let best = null, bestDist = Infinity
   for (const r of renderables.value) {
     if (r.isRoom) continue  // never auto-grab rooms — too easy to drag a whole room
+    // 压成底图的层不参与命中 —— SVG 那边靠 pointer-events:none 挡住了直接点击,
+    // 这条 JS 兜底路径不挡的话, 点在旁边照样能把别的层抓起来。
+    if (dimmedIds.value.has(r.id)) continue
     let lx = p.x - r.x, lz = p.z - r.z
     if (r.rot) {
       const a = -r.rot * Math.PI / 180
@@ -197,6 +338,9 @@ function findNearestShape(p) {
 function findShapeAt(x, z, kindFilter = 'any') {
   const candidates = []
   for (const r of renderables.value) {
+    // 同 findNearestShape: 底图层不接命中。放家具选父级、拖动换父级都走这里 ——
+    // 不挡的话新东西会掉进一个当前根本看不见的层里。
+    if (dimmedIds.value.has(r.id)) continue
     if (kindFilter === 'room' && !r.isRoom) continue
     if (kindFilter === 'container') {
       const c = catalogFor(r.kind)
@@ -361,7 +505,11 @@ async function placeFurniture(kind, x, z) {
   // Multi-level container → ask which level (skip prompt for non-box kinds; default L1).
   let level = 0
   if (parentGeo?.levels >= 2) {
-    if (kind === 'box') {
+    // 正盯着这个容器的某一层时, 新东西就落在这一层 —— 用户已经用层筛选表过态了,
+    // 再弹一次"放第几层"是多余的一步。
+    if (levelHost.value?.loc.id === parentId && focusLevel.value) {
+      level = Math.min(parentGeo.levels, focusLevel.value)
+    } else if (kind === 'box') {
       const ans = prompt(`把"${cat.label}"放在第几层?(1=底层 ~ ${parentGeo.levels}=顶层)`, '1')
       if (ans === null) return
       level = Math.max(1, Math.min(parentGeo.levels, parseInt(ans, 10) || 1))
@@ -975,6 +1123,37 @@ const ghost = computed(() => {
       <button class="btn btn-danger text-xs flex-shrink-0" :disabled="locked || !selectedId" @click="deleteSelected" title="删除选中">🗑</button>
     </div>
 
+    <!-- 层筛选 — 只在选中的位置(或它父级)是多层容器时出现。俯视图里各层完全重叠,
+         这一条是唯一能把它们分开看的手段。 -->
+    <div v-if="levelHost"
+         class="card p-1.5 flex items-center gap-1 flex-wrap text-xs">
+      <span class="text-slate-500 px-1 flex-shrink-0">
+        {{ levelHost.loc.name }} · 分层
+      </span>
+      <button :class="['px-2 py-1 rounded-md flex-shrink-0',
+                       focusLevel === 0 ? 'bg-slate-900 text-white' : 'bg-slate-100 hover:bg-slate-200']"
+              title="所有层一起显示"
+              @click="focusLevel = 0">全部</button>
+      <button v-for="i in levelHost.geo.levels" :key="i"
+              :class="['px-2 py-1 rounded-md flex-shrink-0',
+                       focusLevel === i ? 'bg-slate-900 text-white'
+                       : levelCounts[i] ? 'bg-slate-100 hover:bg-slate-200'
+                       : 'bg-slate-50 text-slate-400 hover:bg-slate-100']"
+              :title="`只显示第 ${i} 层${i === 1 ? ' (最底层)' : ''} — 其余层压成底图, 点不到也拖不动`"
+              @click="focusLevel = focusLevel === i ? 0 : i">
+        {{ i }}<span v-if="levelCounts[i]" class="ml-0.5 opacity-70">·{{ levelCounts[i] }}</span>
+      </button>
+      <span v-if="levelCounts[0]" class="text-slate-400 px-1 flex-shrink-0"
+            :title="`${levelCounts[0]} 个子级没设层, 按自由高度摆放, 不受层筛选影响`">
+        未分层 {{ levelCounts[0] }}
+      </span>
+      <span class="flex-1 min-w-2"></span>
+      <button class="btn btn-secondary text-xs flex-shrink-0"
+              :disabled="locked || !focusLevel || (levelCounts[focusLevel] || 0) < 2"
+              :title="!focusLevel ? '先选一层' : `把第 ${focusLevel} 层的 ${levelCounts[focusLevel] || 0} 件依次排开, 不再叠在一起 (可撤销)`"
+              @click="spreadCurrentLevel">⇥ 本层排开</button>
+    </div>
+
     <div class="text-xs text-slate-500 flex justify-between gap-2">
       <span class="truncate">
         <template v-if="locked">🔒 已锁定 — 只能平移画布和滚轮缩放 (点选物体仅查看)</template>
@@ -1011,7 +1190,11 @@ const ghost = computed(() => {
         <rect :x="vb.x" :y="vb.z" :width="vb.w" :height="vb.d" fill="url(#grid5)" pointer-events="none" />
         <circle cx="0" cy="0" r="0.08" fill="#475569" pointer-events="none" />
 
-        <g v-for="r in renderables" :key="r.id" :transform="liveTransform(r)">
+        <!-- 非当前层压成底图: 低透明度保住空间感, pointer-events 关掉才是"拖不错"
+             的关键 (JS 兜底命中在 findShapeAt / findNearestShape 里另外挡了)。 -->
+        <g v-for="r in renderables" :key="r.id" :transform="liveTransform(r)"
+           :opacity="isDimmed(r.id) ? 0.12 : 1"
+           :pointer-events="isDimmed(r.id) ? 'none' : 'auto'">
           <!-- Shape body. Polygon for non-rectangular rooms, rect otherwise.
                IMPORTANT: <polygon v-if> and <rect v-else> MUST be siblings with
                nothing in between, otherwise Vue pairs the v-else with the wrong
@@ -1069,15 +1252,17 @@ const ghost = computed(() => {
           <line v-if="!r.isRoom" x1="0" y1="0" :x2="0" :y2="-r.d/2"
                 stroke="#0f172a" stroke-width="0.04" stroke-linecap="round" pointer-events="none" />
           <!-- Label inside -->
-          <text x="0" y="0" text-anchor="middle"
+          <text v-if="!isDimmed(r.id)" x="0" y="0" text-anchor="middle"
                 :font-size="Math.min(r.w, r.d) * 0.18 + 0.12"
                 fill="#0f172a" pointer-events="none" style="user-select: none">
             <tspan v-if="r.isRoom">{{ r.icon }} {{ r.label }}</tspan>
             <tspan v-else>{{ r.icon }}</tspan>
           </text>
-          <!-- Label outside (for furniture) -->
-          <text v-if="!r.isRoom" x="0" :y="r.d/2 + 0.18" text-anchor="middle"
-                font-size="0.16" fill="#334155" pointer-events="none" style="user-select: none">
+          <!-- Label outside (for furniture) — labelRow 把横向撞在一起的标签错开行 -->
+          <text v-if="!r.isRoom && !isDimmed(r.id)" x="0"
+                :y="r.d/2 + 0.18 + (labelRow[r.id] || 0) * 0.20" text-anchor="middle"
+                font-size="0.16" fill="#334155" pointer-events="none"
+                style="user-select: none; paint-order: stroke; stroke: #fff; stroke-width: 0.05">
             {{ r.label }}<tspan v-if="r.levels >= 2"> · {{ r.levels }}层</tspan><tspan v-else-if="r.level"> · L{{ r.level }}</tspan>
             <tspan v-if="itemCountByLoc[r.id]" fill="#475569"> · {{ itemCountByLoc[r.id] }}件</tspan>
           </text>
